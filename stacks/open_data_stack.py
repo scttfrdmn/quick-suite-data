@@ -213,10 +213,11 @@ class OpenDataStack(Stack):
         )
 
         if enable_realtime_sync:
-            roda_topic = sns.Topic.from_topic_arn(
-                self, "RodaTopic",
-                "arn:aws:sns:us-east-1:652627389412:roda-object_created",
+            roda_sns_arn = (
+                self.node.try_get_context("roda_sns_arn")
+                or "arn:aws:sns:us-east-1:652627389412:roda-object_created"
             )
+            roda_topic = sns.Topic.from_topic_arn(self, "RodaTopic", roda_sns_arn)
             roda_topic.add_subscription(
                 sns_subscriptions.LambdaSubscription(sync_fn)
             )

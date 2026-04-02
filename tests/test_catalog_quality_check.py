@@ -201,3 +201,66 @@ class TestCatalogQualityCheck:
         assert "stale-c" in table.updated
         assert "fresh-a" not in table.updated
         assert "fresh-d" not in table.updated
+
+
+class TestS3Reachability:
+    """Tests for S3 bucket reachability probing (unreachable flag)."""
+
+    def _make_s3_item(self, slug, bucket):
+        """Return a catalog item with an s3Resources ARN."""
+        return {
+            "slug": slug,
+            "last_updated": int(time.time()) - 86400,  # fresh — not stale
+            "s3Resources": [{"arn": f"arn:aws:s3:::{bucket}"}],
+        }
+
+    def test_missing_s3_bucket_marked_unreachable(self):
+        """head_bucket returns 404 → item flagged unreachable, count = 1."""
+        import unittest.mock as mock
+        from botocore.exceptions import ClientError
+
+        items = [self._make_s3_item("missing-bucket-dataset", "nonexistent-roda-bucket")]
+        mod, table, cw = _make_handler(items)
+
+        fake_s3 = mock.MagicMock()
+        error_resp = {"Error": {"Code": "404", "Message": "Not Found"}}
+        fake_s3.head_bucket.side_effect = ClientError(error_resp, "HeadBucket")
+        mod.s3_anon = fake_s3
+
+        result = mod.handler({}, None)
+
+        assert result["unreachable_count"] == 1
+        assert result["stale_count"] == 0
+        assert "missing-bucket-dataset" in table.updated
+        fake_s3.head_bucket.assert_called_once_with(Bucket="nonexistent-roda-bucket")
+
+    def test_reachable_s3_bucket_not_marked(self):
+        """head_bucket succeeds → item NOT flagged unreachable."""
+        import unittest.mock as mock
+
+        items = [self._make_s3_item("live-bucket-dataset", "active-roda-bucket")]
+        mod, table, cw = _make_handler(items)
+
+        fake_s3 = mock.MagicMock()
+        fake_s3.head_bucket.return_value = {}  # success
+        mod.s3_anon = fake_s3
+
+        result = mod.handler({}, None)
+
+        assert result["unreachable_count"] == 0
+        assert "live-bucket-dataset" not in table.updated
+
+    def test_missing_s3_resources_skips_probe(self):
+        """Item with no s3Resources → probe never called, unreachable_count = 0."""
+        import unittest.mock as mock
+
+        items = [{"slug": "no-s3-resources", "last_updated": int(time.time()) - 86400}]
+        mod, table, cw = _make_handler(items)
+
+        fake_s3 = mock.MagicMock()
+        mod.s3_anon = fake_s3
+
+        result = mod.handler({}, None)
+
+        assert result["unreachable_count"] == 0
+        fake_s3.head_bucket.assert_not_called()
