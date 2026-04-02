@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0] - 2026-04-02
+## [0.6.0] - 2026-04-02  <!-- released -->
 
 ### Added
 - **Feature 14: Source registry** — new DynamoDB table `qs-data-source-registry` (PK: `source_id`, RETAIN removal policy) stores all data source metadata: type, connection_config, display_name, description, tags, data_classification, registered_at
