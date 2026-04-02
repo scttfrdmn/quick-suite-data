@@ -15,6 +15,12 @@ from typing import Any
 
 import boto3
 
+# ---------------------------------------------------------------------------
+# Data classification clearance ordering (lowest → highest)
+# ---------------------------------------------------------------------------
+
+_CLEARANCE_LEVELS = {"public": 0, "internal": 1, "restricted": 2, "phi": 3}
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -235,7 +241,10 @@ def handler(event: dict, context: Any) -> dict:
     Tool arguments:
     - query: str (required)
     - max_results: int (optional, default 10, max 50)
-    - data_classification_filter: str (optional) — only return sources with this classification
+    - data_classification_filter: str (optional) — only return sources with this exact classification
+    - caller_clearance: str (optional) — clearance level of the caller; sources above this level
+      are excluded. Levels (lowest→highest): public < internal < restricted < phi.
+      Defaults to "public" (most restrictive default) if not provided.
     """
     _tool_name = "unknown"
     try:
@@ -257,6 +266,10 @@ def handler(event: dict, context: Any) -> dict:
 
     classification_filter = (event.get("data_classification_filter") or "").strip() or None
 
+    # caller_clearance defaults to "public" (most restrictive) if not supplied
+    raw_clearance = (event.get("caller_clearance") or "public").strip().lower()
+    caller_clearance_level = _CLEARANCE_LEVELS.get(raw_clearance, 0)
+
     query_words = [w for w in query.lower().split() if w]
 
     if not REGISTRY_TABLE:
@@ -271,11 +284,16 @@ def handler(event: dict, context: Any) -> dict:
         logger.error(json.dumps({"registry_scan_error": str(e)}))
         return {"error": f"Failed to load source registry: {e}"}
 
-    # Apply classification filter
+    # Apply clearance filtering: drop sources whose classification exceeds caller's clearance
+    sources = [
+        s for s in all_sources
+        if _CLEARANCE_LEVELS.get((s.get("data_classification") or "public").lower(), 0)
+        <= caller_clearance_level
+    ]
+
+    # Apply optional exact classification filter on top of clearance-filtered set
     if classification_filter:
-        sources = [s for s in all_sources if s.get("data_classification") == classification_filter]
-    else:
-        sources = all_sources
+        sources = [s for s in sources if s.get("data_classification") == classification_filter]
 
     results = []
     skipped_sources = []

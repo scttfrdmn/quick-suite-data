@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-04-02
+
+### Added
+- **Issue #16: Caller clearance filtering** — `federated_search` and `s3_browse` (registry mode) now accept a `caller_clearance` field (public/internal/restricted/phi). Sources whose `data_classification` exceeds the caller's clearance are excluded from results. Defaults to `"public"` when not provided (most restrictive default). Four-level ordering: public < internal < restricted < phi.
+- **Issue #17: KMS encryption** — CDK context flag `enable_kms: true` (default false). When enabled, a customer-managed KMS key (`alias/qs-open-data-data-key`) is created with annual rotation enabled; the RODA catalog table, source registry table, and S3 manifest bucket all use this key. All Lambda execution roles are automatically granted `kms:Decrypt` and `kms:GenerateDataKey`.
+- **Issue #18: HIPAA compliance guide** — `docs/compliance.md` covering `enable_kms` walkthrough, VPC S3 endpoint recommendation, data classification tagging, recommended source registry setup for health science data, and cross-reference to the router compliance guide.
+
 ## [0.6.0] - 2026-04-02  <!-- released -->
 
 ### Added

@@ -590,3 +590,121 @@ class TestS3PreviewIntegration:
         h = _reload_s3_handler("s3-preview", "_s3_preview_integ_c", substrate_url, monkeypatch)
         result = h.handler({"source": "Unknown", "key": "x.csv"}, None)
         assert "error" in result
+
+
+# ===========================================================================
+# s3_browse clearance filtering via source registry (Issue #16)
+# ===========================================================================
+
+_S3_BROWSE_REGISTRY_TABLE = "qs-data-source-registry-s3browse-test"
+
+
+def _create_s3browse_registry(substrate_url):
+    ddb = boto3.client("dynamodb", endpoint_url=substrate_url, region_name="us-east-1")
+    ddb.create_table(
+        TableName=_S3_BROWSE_REGISTRY_TABLE,
+        KeySchema=[{"AttributeName": "source_id", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "source_id", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    waiter = ddb.get_waiter("table_exists")
+    waiter.wait(TableName=_S3_BROWSE_REGISTRY_TABLE)
+    return boto3.resource("dynamodb", endpoint_url=substrate_url, region_name="us-east-1")
+
+
+def _put_s3browse_source(resource, source_id, classification, bucket="test-bucket"):
+    resource.Table(_S3_BROWSE_REGISTRY_TABLE).put_item(Item={
+        "source_id": source_id,
+        "type": "s3",
+        "display_name": f"Source {source_id}",
+        "description": f"A {classification} S3 source",
+        "data_classification": classification,
+        "connection_config": json.dumps({"bucket": bucket, "prefix": ""}),
+    })
+
+
+def _reload_s3browse_registry(substrate_url, monkeypatch, alias):
+    monkeypatch.setenv("AWS_ENDPOINT_URL", substrate_url)
+    monkeypatch.setenv("USE_SOURCE_REGISTRY", "true")
+    monkeypatch.setenv("SOURCE_REGISTRY_TABLE", _S3_BROWSE_REGISTRY_TABLE)
+    path = os.path.join(REPO_ROOT, "lambdas", "s3-browse", "handler.py")
+    spec = importlib.util.spec_from_file_location(alias, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[alias] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.integration
+class TestS3BrowseClearanceFiltering:
+    """Issue #16: s3_browse clearance filtering when USE_SOURCE_REGISTRY=true."""
+
+    def test_public_clearance_hides_restricted_sources(
+        self, substrate_url, reset_substrate, monkeypatch
+    ):
+        resource = _create_s3browse_registry(substrate_url)
+        _put_s3browse_source(resource, "public-src", "public")
+        _put_s3browse_source(resource, "restricted-src", "restricted")
+        h = _reload_s3browse_registry(substrate_url, monkeypatch, "_s3b_clearance_a")
+
+        result = h.handler({"caller_clearance": "public"}, None)
+        labels = [s["label"] for s in result["sources"]]
+        assert "public-src" in labels
+        assert "restricted-src" not in labels
+
+    def test_public_clearance_hides_phi_sources(
+        self, substrate_url, reset_substrate, monkeypatch
+    ):
+        resource = _create_s3browse_registry(substrate_url)
+        _put_s3browse_source(resource, "public-src", "public")
+        _put_s3browse_source(resource, "phi-src", "phi")
+        h = _reload_s3browse_registry(substrate_url, monkeypatch, "_s3b_clearance_b")
+
+        result = h.handler({"caller_clearance": "public"}, None)
+        labels = [s["label"] for s in result["sources"]]
+        assert "public-src" in labels
+        assert "phi-src" not in labels
+
+    def test_phi_clearance_returns_all_levels(
+        self, substrate_url, reset_substrate, monkeypatch
+    ):
+        resource = _create_s3browse_registry(substrate_url)
+        for cls in ["public", "internal", "restricted", "phi"]:
+            _put_s3browse_source(resource, f"{cls}-src", cls)
+        h = _reload_s3browse_registry(substrate_url, monkeypatch, "_s3b_clearance_c")
+
+        result = h.handler({"caller_clearance": "phi"}, None)
+        labels = [s["label"] for s in result["sources"]]
+        assert "public-src" in labels
+        assert "internal-src" in labels
+        assert "restricted-src" in labels
+        assert "phi-src" in labels
+
+    def test_default_clearance_is_public(
+        self, substrate_url, reset_substrate, monkeypatch
+    ):
+        """Omitting caller_clearance defaults to public — most restrictive."""
+        resource = _create_s3browse_registry(substrate_url)
+        _put_s3browse_source(resource, "pub-src", "public")
+        _put_s3browse_source(resource, "int-src", "internal")
+        h = _reload_s3browse_registry(substrate_url, monkeypatch, "_s3b_clearance_d")
+
+        result = h.handler({}, None)
+        labels = [s["label"] for s in result["sources"]]
+        assert "pub-src" in labels
+        assert "int-src" not in labels
+
+    def test_restricted_clearance_includes_public_and_internal(
+        self, substrate_url, reset_substrate, monkeypatch
+    ):
+        resource = _create_s3browse_registry(substrate_url)
+        for cls in ["public", "internal", "restricted", "phi"]:
+            _put_s3browse_source(resource, f"src-{cls}", cls)
+        h = _reload_s3browse_registry(substrate_url, monkeypatch, "_s3b_clearance_e")
+
+        result = h.handler({"caller_clearance": "restricted"}, None)
+        labels = [s["label"] for s in result["sources"]]
+        assert "src-public" in labels
+        assert "src-internal" in labels
+        assert "src-restricted" in labels
+        assert "src-phi" not in labels

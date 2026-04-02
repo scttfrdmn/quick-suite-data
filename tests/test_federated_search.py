@@ -112,7 +112,7 @@ class TestFederatedSearch:
             connection_config=json.dumps({"bucket": "genomics-data", "prefix": "raw/"}),
         )
 
-        result = mod.handler({"query": "genomics sequencing"}, None)
+        result = mod.handler({"query": "genomics sequencing", "caller_clearance": "internal"}, None)
         assert result["total"] >= 1
         assert any(r["source_id"] == "s3-genomics" for r in result["results"])
 
@@ -245,3 +245,162 @@ class TestFederatedSearch:
 
         result = mod.handler({"query": "climate"}, None)
         assert result["total"] <= 10
+
+    # ------------------------------------------------------------------
+    # caller_clearance tests (Issue #16)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.integration
+    def test_caller_clearance_public_excludes_restricted(
+        self, substrate_url, reset_substrate, monkeypatch
+    ):
+        """Public clearance should not return restricted or phi sources."""
+        resource = self._create_tables(substrate_url)
+        mod = self._reload(substrate_url, monkeypatch)
+
+        self._put_registry(resource,
+            source_id="s3-public-data",
+            type="s3",
+            display_name="Public Climate Dataset",
+            description="Open climate records",
+            data_classification="public",
+            connection_config="{}",
+        )
+        self._put_registry(resource,
+            source_id="s3-restricted-data",
+            type="s3",
+            display_name="Restricted Climate Records",
+            description="Internal restricted climate data",
+            data_classification="restricted",
+            connection_config="{}",
+        )
+        self._put_registry(resource,
+            source_id="s3-phi-data",
+            type="s3",
+            display_name="PHI Clinical Climate Data",
+            description="Patient health information climate exposure",
+            data_classification="phi",
+            connection_config="{}",
+        )
+
+        result = mod.handler({"query": "climate", "caller_clearance": "public"}, None)
+        source_ids = [r["source_id"] for r in result["results"]]
+        assert "s3-public-data" in source_ids
+        assert "s3-restricted-data" not in source_ids
+        assert "s3-phi-data" not in source_ids
+
+    @pytest.mark.integration
+    def test_caller_clearance_restricted_excludes_phi(
+        self, substrate_url, reset_substrate, monkeypatch
+    ):
+        """Restricted clearance should return public, internal, restricted but not phi."""
+        resource = self._create_tables(substrate_url)
+        mod = self._reload(substrate_url, monkeypatch)
+
+        for classification in ["public", "internal", "restricted", "phi"]:
+            self._put_registry(resource,
+                source_id=f"s3-{classification}",
+                type="s3",
+                display_name=f"Climate {classification} data",
+                description="climate data records",
+                data_classification=classification,
+                connection_config="{}",
+            )
+
+        result = mod.handler({"query": "climate", "caller_clearance": "restricted"}, None)
+        source_ids = [r["source_id"] for r in result["results"]]
+        assert "s3-public" in source_ids
+        assert "s3-internal" in source_ids
+        assert "s3-restricted" in source_ids
+        assert "s3-phi" not in source_ids
+
+    @pytest.mark.integration
+    def test_caller_clearance_phi_returns_all_levels(
+        self, substrate_url, reset_substrate, monkeypatch
+    ):
+        """PHI clearance should return sources at every classification level."""
+        resource = self._create_tables(substrate_url)
+        mod = self._reload(substrate_url, monkeypatch)
+
+        for classification in ["public", "internal", "restricted", "phi"]:
+            self._put_registry(resource,
+                source_id=f"s3-{classification}",
+                type="s3",
+                display_name=f"Health {classification} records",
+                description="health data records",
+                data_classification=classification,
+                connection_config="{}",
+            )
+
+        result = mod.handler({"query": "health", "caller_clearance": "phi"}, None)
+        source_ids = [r["source_id"] for r in result["results"]]
+        assert "s3-public" in source_ids
+        assert "s3-internal" in source_ids
+        assert "s3-restricted" in source_ids
+        assert "s3-phi" in source_ids
+
+    @pytest.mark.integration
+    def test_caller_clearance_defaults_to_public(
+        self, substrate_url, reset_substrate, monkeypatch
+    ):
+        """Omitting caller_clearance defaults to public — most restrictive."""
+        resource = self._create_tables(substrate_url)
+        mod = self._reload(substrate_url, monkeypatch)
+
+        self._put_registry(resource,
+            source_id="s3-internal-only",
+            type="s3",
+            display_name="Internal genome data",
+            description="internal genome sequencing",
+            data_classification="internal",
+            connection_config="{}",
+        )
+        self._put_registry(resource,
+            source_id="s3-open-genome",
+            type="s3",
+            display_name="Open genome data",
+            description="public genome sequencing",
+            data_classification="public",
+            connection_config="{}",
+        )
+
+        # No caller_clearance provided
+        result = mod.handler({"query": "genome"}, None)
+        source_ids = [r["source_id"] for r in result["results"]]
+        assert "s3-open-genome" in source_ids
+        assert "s3-internal-only" not in source_ids
+
+    @pytest.mark.integration
+    def test_caller_clearance_and_classification_filter_combined(
+        self, substrate_url, reset_substrate, monkeypatch
+    ):
+        """caller_clearance and data_classification_filter can be used together."""
+        resource = self._create_tables(substrate_url)
+        mod = self._reload(substrate_url, monkeypatch)
+
+        self._put_registry(resource,
+            source_id="s3-internal-a",
+            type="s3",
+            display_name="Internal dataset A",
+            description="internal dataset A records",
+            data_classification="internal",
+            connection_config="{}",
+        )
+        self._put_registry(resource,
+            source_id="s3-public-b",
+            type="s3",
+            display_name="Public dataset B",
+            description="public dataset B records",
+            data_classification="public",
+            connection_config="{}",
+        )
+
+        # internal clearance + filter for public only → only public returned
+        result = mod.handler({
+            "query": "dataset",
+            "caller_clearance": "internal",
+            "data_classification_filter": "public",
+        }, None)
+        source_ids = [r["source_id"] for r in result["results"]]
+        assert "s3-public-b" in source_ids
+        assert "s3-internal-a" not in source_ids

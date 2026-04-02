@@ -15,6 +15,12 @@ from typing import Any
 
 import boto3
 
+# ---------------------------------------------------------------------------
+# Data classification clearance ordering (lowest → highest)
+# ---------------------------------------------------------------------------
+
+_CLEARANCE_LEVELS = {"public": 0, "internal": 1, "restricted": 2, "phi": 3}
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -25,8 +31,11 @@ _USE_SOURCE_REGISTRY = os.environ.get('USE_SOURCE_REGISTRY', '').lower() in ('tr
 _SOURCE_REGISTRY_TABLE = os.environ.get('SOURCE_REGISTRY_TABLE', '')
 
 
-def _load_sources_from_registry() -> list:
-    """Load S3 sources from DynamoDB source registry. Falls back to empty list on error."""
+def _load_sources_from_registry(caller_clearance_level: int = 0) -> list:
+    """Load S3 sources from DynamoDB source registry. Falls back to empty list on error.
+
+    Filters out sources whose data_classification exceeds caller_clearance_level.
+    """
     if not _SOURCE_REGISTRY_TABLE:
         return []
     try:
@@ -37,6 +46,10 @@ def _load_sources_from_registry() -> list:
         items = resp.get('Items', [])
         sources = []
         for item in items:
+            # Clearance check: skip sources above caller's clearance level
+            classification = (item.get('data_classification') or 'public').lower()
+            if _CLEARANCE_LEVELS.get(classification, 0) > caller_clearance_level:
+                continue
             try:
                 conn = json.loads(item.get('connection_config', '{}'))
             except (json.JSONDecodeError, TypeError):
@@ -46,6 +59,7 @@ def _load_sources_from_registry() -> list:
                 'bucket': conn.get('bucket', ''),
                 'prefix': conn.get('prefix', ''),
                 'description': conn.get('description', item.get('description', '')),
+                'data_classification': classification,
             })
         return sources
     except Exception as e:
@@ -53,9 +67,9 @@ def _load_sources_from_registry() -> list:
         return []
 
 
-# Loaded at cold start
+# Loaded at cold start (without caller_clearance — will be filtered per-request when registry mode)
 if _USE_SOURCE_REGISTRY:
-    _sources: list[dict] = _load_sources_from_registry()
+    _sources: list[dict] = _load_sources_from_registry(caller_clearance_level=3)  # load all at cold start
 else:
     try:
         _sources = json.loads(os.environ.get('SOURCES_CONFIG', '[]'))
@@ -73,6 +87,9 @@ def handler(event: dict, context: Any) -> dict:
                     or omit to list available sources
     - prefix: str — S3 key prefix within the source to browse (optional)
     - max_keys: int — max objects to return (default 100, max 500)
+    - caller_clearance: str — clearance level of the caller; sources above this level are hidden.
+      Levels (lowest→highest): public < internal < restricted < phi.
+      Defaults to "public" if not provided. Only applied when use_source_registry is enabled.
     """
     _tool_name = "unknown"
     try:
@@ -82,18 +99,26 @@ def handler(event: dict, context: Any) -> dict:
         pass
     logger.info(json.dumps({"tool": _tool_name, "event": event}))
 
+    # When using source registry, apply caller_clearance filtering per-request
+    raw_clearance = (event.get('caller_clearance') or 'public').strip().lower()
+    caller_clearance_level = _CLEARANCE_LEVELS.get(raw_clearance, 0)
+    if _USE_SOURCE_REGISTRY:
+        effective_sources = _load_sources_from_registry(caller_clearance_level=caller_clearance_level)
+    else:
+        effective_sources = _sources
+
     if not event.get('source') and not event.get('list_sources'):
         # No source specified: return the catalog of available sources
-        return _list_sources()
+        return _list_sources(effective_sources)
 
     source_label = event.get('source', '').strip()
     if not source_label:
-        return _list_sources()
+        return _list_sources(effective_sources)
 
-    source = _find_source(source_label)
+    source = _find_source(source_label, effective_sources)
     if not source:
         return {'error': f'Source "{source_label}" not found. '
-                         f'{len(_sources)} source(s) are configured.'}
+                         f'{len(effective_sources)} source(s) are configured.'}
 
     bucket = source['bucket']
     base_prefix = source.get('prefix', '')
@@ -157,8 +182,9 @@ def handler(event: dict, context: Any) -> dict:
         return {'error': f'Browse failed: {e}'}
 
 
-def _list_sources() -> dict:
+def _list_sources(sources: list | None = None) -> dict:
     """Return the catalog of configured institutional sources."""
+    src_list = sources if sources is not None else _sources
     return {
         'sources': [
             {
@@ -166,16 +192,17 @@ def _list_sources() -> dict:
                 'description': s.get('description', ''),
                 'prefix': s.get('prefix', '(root)'),
             }
-            for s in _sources
+            for s in src_list
         ],
-        'count': len(_sources),
+        'count': len(src_list),
         'hint': 'Use the "source" argument with one of these labels to browse.',
     }
 
 
-def _find_source(label: str) -> dict | None:
+def _find_source(label: str, sources: list | None = None) -> dict | None:
+    src_list = sources if sources is not None else _sources
     label_lower = label.lower()
-    for s in _sources:
+    for s in src_list:
         if s['label'].lower() == label_lower:
             return s
     return None

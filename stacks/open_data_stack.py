@@ -45,6 +45,9 @@ from aws_cdk import (
     aws_iam as iam,
 )
 from aws_cdk import (
+    aws_kms as kms,
+)
+from aws_cdk import (
     aws_lambda as lambda_,
 )
 from aws_cdk import (
@@ -92,9 +95,33 @@ class OpenDataStack(Stack):
             config = _load_yaml(str(sources_path))
             institutional_sources = config.get("institutional_sources", [])
 
+        enable_kms = bool(self.node.try_get_context("enable_kms"))
+
+        # -----------------------------------------------------------------
+        # KMS: Customer-managed key (enable_kms=true only)
+        # -----------------------------------------------------------------
+        cmk: kms.Key | None = None
+        if enable_kms:
+            cmk = kms.Key(
+                self,
+                "DataKey",
+                alias=f"alias/{prefix}-data-key",
+                description="CMK for Quick Suite Open Data DynamoDB tables and S3 manifest bucket",
+                enable_key_rotation=True,
+                removal_policy=RemovalPolicy.RETAIN,
+            )
+
         # -----------------------------------------------------------------
         # DynamoDB: RODA Catalog
         # -----------------------------------------------------------------
+        _ddb_encryption = (
+            dynamodb.TableEncryption.CUSTOMER_MANAGED if enable_kms
+            else dynamodb.TableEncryption.AWS_MANAGED
+        )
+        _ddb_kms_kwargs: dict = {"encryption": _ddb_encryption}
+        if enable_kms and cmk:
+            _ddb_kms_kwargs["encryption_key"] = cmk
+
         search_cache_table = dynamodb.Table(
             self,
             "RodaSearchCache",
@@ -105,6 +132,7 @@ class OpenDataStack(Stack):
             time_to_live_attribute="ttl",
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.DESTROY,
+            **_ddb_kms_kwargs,
         )
 
         catalog_table = dynamodb.Table(
@@ -116,6 +144,7 @@ class OpenDataStack(Stack):
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.DESTROY,
+            **_ddb_kms_kwargs,
         )
 
         catalog_table.add_global_secondary_index(
@@ -143,6 +172,11 @@ class OpenDataStack(Stack):
         # -----------------------------------------------------------------
         # S3: Manifest Bucket
         # -----------------------------------------------------------------
+        _s3_encryption = s3.BucketEncryption.KMS if enable_kms else s3.BucketEncryption.S3_MANAGED
+        _s3_kms_kwargs: dict = {"encryption": _s3_encryption}
+        if enable_kms and cmk:
+            _s3_kms_kwargs["encryption_key"] = cmk
+
         manifest_bucket = s3.Bucket(
             self,
             "ManifestBucket",
@@ -152,6 +186,7 @@ class OpenDataStack(Stack):
             lifecycle_rules=[
                 s3.LifecycleRule(expiration=Duration.days(7))
             ],
+            **_s3_kms_kwargs,
         )
 
         # -----------------------------------------------------------------
@@ -493,6 +528,7 @@ class OpenDataStack(Stack):
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.RETAIN,
+            **_ddb_kms_kwargs,
         )
 
         # CDK migration flag — when true, s3-browse loads sources from DynamoDB
@@ -679,6 +715,20 @@ class OpenDataStack(Stack):
                     principal=iam.ArnPrincipal(gateway_role_arn),
                     action="lambda:InvokeFunction",
                 )
+
+        # -----------------------------------------------------------------
+        # KMS grants — Lambda execution roles need decrypt + generate key
+        # -----------------------------------------------------------------
+        if enable_kms and cmk:
+            _all_lambda_fns = [
+                sync_fn, search_fn, loader_fn, browse_fn, preview_fn, s3_load_fn,
+                claws_resolver_fn, quality_check_fn, register_source_fn,
+                snowflake_browse_fn, snowflake_preview_fn,
+                redshift_browse_fn, redshift_preview_fn,
+                federated_search_fn,
+            ]
+            for fn in _all_lambda_fns:
+                cmk.grant(fn.grant_principal, "kms:Decrypt", "kms:GenerateDataKey")
 
         # -----------------------------------------------------------------
         # Outputs — Lambda ARNs for AgentCore Gateway target registration
