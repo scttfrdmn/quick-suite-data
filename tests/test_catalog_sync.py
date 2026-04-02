@@ -147,6 +147,18 @@ class TestTransformDataset:
         item = handler_mod.transform_dataset(SAMPLE_DATASET, "roda/ndjson/noaa-climate.ndjson")
         assert item["sourceKey"] == "roda/ndjson/noaa-climate.ndjson"
 
+    def test_last_updated_written(self):
+        import time
+        before = int(time.time())
+        item = handler_mod.transform_dataset(SAMPLE_DATASET, "roda/ndjson/noaa-climate.ndjson")
+        after = int(time.time())
+        assert "last_updated" in item
+        assert before <= item["last_updated"] <= after
+
+    def test_last_updated_is_integer(self):
+        item = handler_mod.transform_dataset(SAMPLE_DATASET, "roda/ndjson/noaa-climate.ndjson")
+        assert isinstance(item["last_updated"], int)
+
 
 # ---------------------------------------------------------------------------
 # derive_slug() unit tests

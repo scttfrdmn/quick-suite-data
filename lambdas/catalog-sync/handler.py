@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any
 
 import boto3
@@ -203,6 +204,7 @@ def transform_dataset(dataset: dict, source_key: str) -> dict | None:
         's3ResourceCount': len(s3_resources),
         'registryUrl': f"https://registry.opendata.aws/{slug}/",
         'sourceKey': source_key,
+        'last_updated': int(time.time()),
     }
 
     # Include DataAtWork if present (tutorials, publications)
