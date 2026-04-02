@@ -23,6 +23,7 @@ import uuid
 from typing import Any
 
 import boto3
+from boto3.dynamodb.conditions import Attr, Key
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -75,6 +76,8 @@ def handler(event: dict, context: Any) -> dict:
     _raw_sample = event.get('sample_only', False)
     sample_only = _raw_sample.lower() in ("true", "1", "yes") if isinstance(_raw_sample, str) else bool(_raw_sample)
     custom_name = event.get('dataset_name', '')
+    join_slug = event.get('join_slug', '').strip()
+    join_key = event.get('join_key', '').strip()
 
     # Look up dataset in catalog
     table = dynamodb.Table(TABLE_NAME)
@@ -177,9 +180,40 @@ def handler(event: dict, context: Any) -> dict:
     dataset_name = custom_name or f"RODA: {item.get('name', slug)}"
     ds_id = f"roda-{slug}-{uuid.uuid4().hex[:8]}"
 
+    # Optional join: load a second RODA dataset and join in QuickSight
+    join_manifest_key = None
+    join_item = None
+    if join_slug and join_key:
+        try:
+            join_resp = table.get_item(Key={'slug': join_slug})
+            join_item = join_resp.get('Item')
+        except Exception:
+            join_item = None
+        if join_item:
+            join_s3_resources = join_item.get('s3Resources', [])
+            if join_s3_resources:
+                join_bucket = _extract_bucket_name(join_s3_resources[0].get('arn', ''))
+                if join_bucket:
+                    try:
+                        join_files = _probe_bucket(join_bucket, '', format_hint,
+                                                   max_files=MAX_MANIFEST_FILES)
+                        if join_files:
+                            join_manifest = _generate_manifest(join_bucket, join_files, format_hint)
+                            join_manifest_key = f"roda-manifests/{join_slug}/{uuid.uuid4().hex[:8]}.manifest.json"
+                            s3.put_object(
+                                Bucket=MANIFEST_BUCKET,
+                                Key=join_manifest_key,
+                                Body=json.dumps(join_manifest),
+                                ContentType='application/json',
+                            )
+                    except Exception:
+                        join_manifest_key = None
+
     try:
         qs_result = _create_quicksight_dataset(
-            ds_id, dataset_name, MANIFEST_BUCKET, manifest_key, format_hint
+            ds_id, dataset_name, MANIFEST_BUCKET, manifest_key, format_hint,
+            join_manifest_key=join_manifest_key,
+            join_key=join_key if join_manifest_key else None,
         )
     except Exception as e:
         return {
@@ -191,7 +225,28 @@ def handler(event: dict, context: Any) -> dict:
             'format': format_hint,
         }
 
-    return {
+    # Related dataset suggestions (same primary tag, up to 5)
+    suggestions = []
+    primary_tag = item.get('primaryTag', '')
+    if primary_tag:
+        try:
+            sugg_resp = table.query(
+                IndexName='by-primary-tag',
+                KeyConditionExpression=Key('primaryTag').eq(primary_tag),
+                FilterExpression=Attr('slug').ne(slug),
+                Limit=6,
+                ProjectionExpression='slug, #n',
+                ExpressionAttributeNames={'#n': 'name'},
+            )
+            suggestions = [
+                {'slug': r['slug'], 'name': r.get('name', '')}
+                for r in sugg_resp.get('Items', [])
+                if r['slug'] != slug
+            ][:5]
+        except Exception:
+            pass
+
+    result = {
         'status': 'loaded',
         'datasetId': ds_id,
         'datasetName': dataset_name,
@@ -202,7 +257,12 @@ def handler(event: dict, context: Any) -> dict:
         'registryUrl': item.get('registryUrl', ''),
         'quicksightResult': qs_result,
         'claws_source_id': f'roda-{slug}',
+        'suggestions': suggestions,
     }
+    if join_manifest_key and join_item:
+        result['join_applied'] = True
+        result['join_slug'] = join_slug
+    return result
 
 
 def _extract_bucket_name(arn: str) -> str:
@@ -280,12 +340,27 @@ def _generate_manifest(bucket: str, keys: list[str], format_hint: str) -> dict:
 
 def _create_quicksight_dataset(
     ds_id: str, name: str, manifest_bucket: str,
-    manifest_key: str, format_hint: str
+    manifest_key: str, format_hint: str,
+    join_manifest_key: str = None, join_key: str = None,
 ) -> dict:
     data_source_id = f"{ds_id}-source"
     qs_region = os.environ.get("QUICKSIGHT_REGION", "us-east-1")
     qs_user = os.environ.get("QUICKSIGHT_USER", "Admin")
     admin_principal = f"arn:aws:quicksight:{qs_region}:{QS_ACCOUNT_ID}:user/default/{qs_user}"
+
+    permissions = [
+        {
+            'Principal': admin_principal,
+            'Actions': [
+                'quicksight:DescribeDataSource',
+                'quicksight:DescribeDataSourcePermissions',
+                'quicksight:PassDataSource',
+                'quicksight:UpdateDataSource',
+                'quicksight:DeleteDataSource',
+                'quicksight:UpdateDataSourcePermissions',
+            ],
+        },
+    ]
 
     ds_response = quicksight.create_data_source(
         AwsAccountId=QS_ACCOUNT_ID,
@@ -300,19 +375,7 @@ def _create_quicksight_dataset(
                 },
             },
         },
-        Permissions=[
-            {
-                'Principal': admin_principal,
-                'Actions': [
-                    'quicksight:DescribeDataSource',
-                    'quicksight:DescribeDataSourcePermissions',
-                    'quicksight:PassDataSource',
-                    'quicksight:UpdateDataSource',
-                    'quicksight:DeleteDataSource',
-                    'quicksight:UpdateDataSourcePermissions',
-                ],
-            },
-        ],
+        Permissions=permissions,
     )
 
     # Wait for DataSource to become ready before creating the DataSet
@@ -329,22 +392,71 @@ def _create_quicksight_dataset(
     else:
         raise RuntimeError("DataSource creation timed out after 10 seconds")
 
-    # Create the DataSet on top of the DataSource (required for QuickSight analyses)
-    quicksight.create_data_set(
+    physical_table_map = {
+        "primary": {
+            "S3Source": {
+                "DataSourceArn": ds_response["Arn"],
+                "UploadSettings": {"Format": (format_hint or "CSV").upper()},
+                "InputColumns": [],
+            }
+        }
+    }
+    logical_table_map = None
+
+    # If joining a second dataset, create its data source and add a join
+    if join_manifest_key and join_key:
+        join_source_id = f"{ds_id}-join-source"
+        join_ds_response = quicksight.create_data_source(
+            AwsAccountId=QS_ACCOUNT_ID,
+            DataSourceId=join_source_id,
+            Name=f"{name} (Join Source)",
+            Type='S3',
+            DataSourceParameters={
+                'S3Parameters': {
+                    'ManifestFileLocation': {
+                        'Bucket': manifest_bucket,
+                        'Key': join_manifest_key,
+                    },
+                },
+            },
+            Permissions=permissions,
+        )
+        for _ in range(10):
+            st = quicksight.describe_data_source(
+                AwsAccountId=QS_ACCOUNT_ID, DataSourceId=join_source_id
+            )["DataSource"]["Status"]
+            if st == "CREATION_SUCCESSFUL":
+                break
+            if st == "CREATION_FAILED":
+                raise RuntimeError("Join DataSource creation failed")
+            time.sleep(1)
+
+        physical_table_map["secondary"] = {
+            "S3Source": {
+                "DataSourceArn": join_ds_response["Arn"],
+                "UploadSettings": {"Format": (format_hint or "CSV").upper()},
+                "InputColumns": [],
+            }
+        }
+        logical_table_map = {
+            "joined": {
+                "Alias": "joined",
+                "Source": {
+                    "JoinInstruction": {
+                        "LeftOperand": "primary",
+                        "RightOperand": "secondary",
+                        "Type": "INNER",
+                        "OnClause": f"{join_key} = {join_key}",
+                    }
+                },
+            }
+        }
+
+    dataset_kwargs = dict(
         AwsAccountId=QS_ACCOUNT_ID,
         DataSetId=ds_id,
         Name=name,
-        PhysicalTableMap={
-            "source": {
-                "S3Source": {
-                    "DataSourceArn": ds_response["Arn"],
-                    "UploadSettings": {
-                        "Format": (format_hint or "CSV").upper(),
-                    },
-                    "InputColumns": [],  # QuickSight auto-infers columns
-                }
-            }
-        },
+        PhysicalTableMap=physical_table_map,
         ImportMode="DIRECT_QUERY",
         Permissions=[
             {
@@ -359,6 +471,10 @@ def _create_quicksight_dataset(
             },
         ],
     )
+    if logical_table_map:
+        dataset_kwargs['LogicalTableMap'] = logical_table_map
+
+    quicksight.create_data_set(**dataset_kwargs)
 
     return {
         'dataSourceId': data_source_id,

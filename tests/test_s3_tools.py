@@ -336,3 +336,113 @@ class TestS3LoadIntegration:
         assert result["status"] == "loaded"
         ds_id = result.get("quicksightResult", {}).get("dataSourceId", "")
         assert ds_id.endswith("-source"), f"Expected '-source' suffix, got: {ds_id}"
+
+
+# ===========================================================================
+# s3_load multi-prefix
+# ===========================================================================
+
+def _mock_qs_s3load():
+    """QS mock that completes create_data_source polling on first iteration."""
+    qs = MagicMock()
+    qs.create_data_source.return_value = {
+        "DataSourceId": "test-source",
+        "Arn": "arn:aws:quicksight:us-east-1:123456789012:datasource/test-source",
+    }
+    qs.describe_data_source.return_value = {"DataSource": {"Status": "CREATION_SUCCESSFUL"}}
+    qs.create_data_set.return_value = {}
+    return qs
+
+
+class TestS3LoadMultiPrefix:
+    """Tests for the prefixes list parameter added in v0.4.0."""
+
+    def test_two_prefixes_combined(self):
+        # Each prefix probe returns 2 files → 4 total
+        mock_s3 = _make_s3_paginator(keys=["f1.csv", "f2.csv"])
+        mock_qs = _mock_qs_s3load()
+        with patch.object(_s3_load, "_sources", SOURCES), \
+             patch.object(_s3_load, "s3", mock_s3), \
+             patch.object(_s3_load, "quicksight", mock_qs), \
+             patch("time.sleep"):
+            result = _s3_load.handler(
+                {"source": "Research Data", "format": "csv", "prefixes": ["2023/", "2024/"]}, None
+            )
+        assert result["status"] == "loaded"
+        assert result["fileCount"] == 4
+        assert result["prefixCount"] == 2
+
+    def test_single_prefix_no_prefixes_param(self):
+        mock_s3 = _make_s3_paginator(keys=["datasets/f1.csv", "datasets/f2.csv", "datasets/f3.csv"])
+        mock_qs = _mock_qs_s3load()
+        with patch.object(_s3_load, "_sources", SOURCES), \
+             patch.object(_s3_load, "s3", mock_s3), \
+             patch.object(_s3_load, "quicksight", mock_qs), \
+             patch("time.sleep"):
+            result = _s3_load.handler(
+                {"source": "Research Data", "format": "csv", "prefix": "datasets/"}, None
+            )
+        assert result["status"] == "loaded"
+        assert result["fileCount"] == 3
+        assert result["prefixCount"] == 1
+
+    def test_dotdot_in_prefix_returns_error(self):
+        with patch.object(_s3_load, "_sources", SOURCES):
+            result = _s3_load.handler(
+                {"source": "Research Data", "format": "csv", "prefixes": ["../etc/passwd"]}, None
+            )
+        assert "error" in result
+        assert "access denied" in result["error"].lower()
+
+    def test_prefixes_takes_priority_over_prefix(self):
+        mock_s3 = _make_s3_paginator(keys=["f1.csv", "f2.csv"])
+        mock_qs = _mock_qs_s3load()
+        with patch.object(_s3_load, "_sources", SOURCES), \
+             patch.object(_s3_load, "s3", mock_s3), \
+             patch.object(_s3_load, "quicksight", mock_qs), \
+             patch("time.sleep"):
+            result = _s3_load.handler(
+                {
+                    "source": "Research Data",
+                    "format": "csv",
+                    "prefix": "old/",
+                    "prefixes": ["2023/", "2024/"],
+                },
+                None,
+            )
+        assert result["status"] == "loaded"
+        assert result["prefixCount"] == 2
+
+    def test_sample_only_caps_total_files(self):
+        # 20 files available per prefix; with 3 prefixes and sample_only,
+        # max_per_prefix = 10 // 3 = 3 → total ≤ 9
+        mock_s3 = _make_s3_paginator(keys=[f"data/f{i}.csv" for i in range(20)])
+        mock_qs = _mock_qs_s3load()
+        with patch.object(_s3_load, "_sources", SOURCES), \
+             patch.object(_s3_load, "s3", mock_s3), \
+             patch.object(_s3_load, "quicksight", mock_qs), \
+             patch("time.sleep"):
+            result = _s3_load.handler(
+                {
+                    "source": "Research Data",
+                    "format": "csv",
+                    "prefixes": ["a/", "b/", "c/"],
+                    "sample_only": True,
+                },
+                None,
+            )
+        assert result.get("fileCount", 0) <= 10
+
+    def test_empty_prefixes_list_falls_back_to_no_prefix(self):
+        # Empty list → extra_prefixes = [] → handler uses extra_prefixes = [single_prefix]
+        mock_s3 = _make_s3_paginator(keys=["f1.csv"])
+        mock_qs = _mock_qs_s3load()
+        with patch.object(_s3_load, "_sources", SOURCES), \
+             patch.object(_s3_load, "s3", mock_s3), \
+             patch.object(_s3_load, "quicksight", mock_qs), \
+             patch("time.sleep"):
+            result = _s3_load.handler(
+                {"source": "Research Data", "format": "csv", "prefixes": []}, None
+            )
+        assert result["status"] == "loaded"
+        assert result["prefixCount"] == 1

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-04-01
+
+### Fixed
+- Integration tests unblocked by Substrate 0.45.5: QuickSight `create_data_source` / `describe_data_source` path routing now correct (`data-sources` with hyphen), and DynamoDB `Scan` with empty-string top-level attributes now round-trips correctly — all 7 previously skipped QuickSight integration tests now pass
+
+## [0.4.1] - 2026-04-01
+
+### Added
+- Unit tests for `roda_load` join path: `TestDatasetLoaderJoin` (6 tests) — happy path with `LogicalTableMap`, join slug not found, no files for join slug, join data-source failure → manifest-ready, join_slug without join_key ignored, join_key without join_slug ignored
+- Unit tests for `roda_load` suggestions: `TestDatasetLoaderSuggestions` (4 tests) — primary-tag GSI query, cap at 5 results, no primaryTag → empty list, GSI error is nonfatal
+- Unit tests for `s3_load` multi-prefix: `TestS3LoadMultiPrefix` (6 tests) — two prefixes combined, single prefix backward compat, path-traversal rejection, prefixes takes priority over prefix, sample_only caps total files, empty prefixes falls back to single
+- Integration tests for `roda_search`: `TestRodaSearchIntegration` (5 tests) — empty query scan, single-tag GSI query, keyword search, max_results, format filter; seeds Substrate DynamoDB using low-level client with explicit DynamoDB wire format (workaround for scttfrdmn/substrate#254)
+
+## [0.4.0] - 2026-04-01
+
+### Added
+- Dataset join support in `roda_load`: optional `join_slug` + `join_key` parameters load a second RODA dataset and join both into a single Quick Sight dataset using `LogicalTableMap` `JoinInstruction` (INNER join)
+- Bulk prefix load in `s3_load`: optional `prefixes` list accepts multiple S3 key prefixes; files from all prefixes are combined into a single Quick Sight manifest and dataset; `prefixCount` field added to response
+- Related dataset suggestions in `roda_load` response: `suggestions` list (up to 5) returns slug + name of datasets sharing the same primary tag, queried from the `by-primary-tag` GSI
+
+### Changed
+- Closed open-data #11 (real-time SNS catalog trigger already implemented in v0.3.0)
+
 ## [0.3.0] - 2026-04-01
 
 ### Added
@@ -38,7 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Shared `data_utils` Lambda layer for format detection and schema inference
 - CDK stack with AgentCore Gateway Lambda target wiring and IAM policies scoped to configured sources
 
-[unreleased]: https://github.com/scttfrdmn/quick-suite-open-data/compare/v0.3.0...HEAD
+[unreleased]: https://github.com/scttfrdmn/quick-suite-open-data/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/scttfrdmn/quick-suite-open-data/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/scttfrdmn/quick-suite-open-data/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/scttfrdmn/quick-suite-open-data/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/scttfrdmn/quick-suite-open-data/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/scttfrdmn/quick-suite-open-data/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/scttfrdmn/quick-suite-open-data/releases/tag/v0.1.0

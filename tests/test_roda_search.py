@@ -5,10 +5,14 @@ Uses MagicMock to patch the module-level DynamoDB resource. No real AWS
 calls are made.
 """
 
+import importlib
 import importlib.util
+import json
 import os
 import sys
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
 
@@ -228,3 +232,152 @@ class TestDynamoDBErrors:
         with _patch_table(table):
             result = roda_search.handler({"tags": ["climate"]}, None)
         assert result["count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — real DynamoDB via Substrate
+# ---------------------------------------------------------------------------
+
+_CATALOG_TABLE = "qs-catalog-test"
+
+# Seed items in explicit DynamoDB wire format (avoids Substrate deserialization
+# issues with nested map-in-list types that boto3's resource interface produces).
+# SS (StringSet) is used for formats/tags so that `"csv" in item["formats"]` works
+# after boto3 deserializes SS → Python set.
+# NOTE: Substrate does not support empty-string DynamoDB values ("S": "").
+# Omit optional string fields that may be empty in real catalog items.
+_INTEG_ITEMS_DDB = [
+    {
+        "slug": {"S": "noaa-climate"},
+        "name": {"S": "NOAA Climate"},
+        "primaryTag": {"S": "climate"},
+        "tags": {"SS": ["climate", "weather"]},
+        "description": {"S": "Climate measurements from NOAA stations."},
+        "searchText": {"S": "climate weather temperature precipitation atmospheric"},
+        "formats": {"SS": ["csv", "parquet"]},
+        "license": {"S": "Open Data"},
+        "managedBy": {"S": "NOAA"},
+        "updateFrequency": {"S": "Daily"},
+        "registryUrl": {"S": "https://registry.opendata.aws/noaa-climate/"},
+        "s3ResourceCount": {"N": "1"},
+    },
+    {
+        "slug": {"S": "ncbi-genome"},
+        "name": {"S": "NCBI 1000 Genomes"},
+        "primaryTag": {"S": "genomics"},
+        "tags": {"SS": ["genomics", "bioinformatics"]},
+        "description": {"S": "Whole genome sequencing data."},
+        "searchText": {"S": "genomics dna rna sequencing variant genome"},
+        "formats": {"SS": ["vcf", "bam"]},
+        "license": {"S": "Open Data"},
+        "managedBy": {"S": "NCBI"},
+        "updateFrequency": {"S": "Periodic"},
+        "registryUrl": {"S": "https://registry.opendata.aws/ncbi-genome/"},
+        "s3ResourceCount": {"N": "1"},
+    },
+    {
+        "slug": {"S": "noaa-ocean"},
+        "name": {"S": "NOAA Ocean Data"},
+        "primaryTag": {"S": "oceans"},
+        "tags": {"SS": ["oceans", "marine"]},
+        "description": {"S": "Ocean temperature and salinity measurements."},
+        "searchText": {"S": "ocean temperature salinity marine coastal bathymetry"},
+        "formats": {"SS": ["csv"]},
+        "license": {"S": "Open Data"},
+        "managedBy": {"S": "NOAA"},
+        "updateFrequency": {"S": "Daily"},
+        "registryUrl": {"S": "https://registry.opendata.aws/noaa-ocean/"},
+        "s3ResourceCount": {"N": "1"},
+    },
+]
+
+
+@pytest.mark.integration
+class TestRodaSearchIntegration:
+
+    def _reload_search(self, substrate_url, monkeypatch):
+        """Reload roda-search handler targeting Substrate."""
+        monkeypatch.setenv("AWS_ENDPOINT_URL", substrate_url)
+        env = {"TABLE_NAME": _CATALOG_TABLE, "SEARCH_CACHE_TABLE": ""}
+        with patch.dict(os.environ, env):
+            alias = "_roda_search_integ"
+            path = os.path.join(REPO_ROOT, "lambdas", "roda-search", "handler.py")
+            spec = importlib.util.spec_from_file_location(alias, path)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[alias] = mod
+            spec.loader.exec_module(mod)
+            return mod
+
+    def _seed_catalog(self, substrate_url, items_ddb):
+        """Create table and seed items in Substrate using low-level client.
+
+        Items are in DynamoDB wire format to avoid boto3 resource-interface
+        serialization of nested structures that Substrate doesn't round-trip.
+        """
+        import boto3
+
+        ddb = boto3.client(
+            "dynamodb",
+            endpoint_url=substrate_url,
+            region_name="us-east-1",
+            aws_access_key_id="test",
+            aws_secret_access_key="test",
+        )
+        ddb.create_table(
+            TableName=_CATALOG_TABLE,
+            KeySchema=[{"AttributeName": "slug", "KeyType": "HASH"}],
+            AttributeDefinitions=[
+                {"AttributeName": "slug", "AttributeType": "S"},
+                {"AttributeName": "primaryTag", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "by-primary-tag",
+                    "KeySchema": [{"AttributeName": "primaryTag", "KeyType": "HASH"}],
+                    "Projection": {"ProjectionType": "ALL"},
+                }
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        waiter = ddb.get_waiter("table_exists")
+        waiter.wait(TableName=_CATALOG_TABLE)
+        for item in items_ddb:
+            ddb.put_item(TableName=_CATALOG_TABLE, Item=item)
+
+    def test_empty_query_returns_all_seeded_items(self, substrate_url, reset_substrate, monkeypatch):
+        self._seed_catalog(substrate_url, _INTEG_ITEMS_DDB)
+        h = self._reload_search(substrate_url, monkeypatch)
+        result = h.handler({}, None)
+        assert result["count"] >= 3
+
+    def test_single_tag_filter_via_gsi(self, substrate_url, reset_substrate, monkeypatch):
+        self._seed_catalog(substrate_url, _INTEG_ITEMS_DDB)
+        h = self._reload_search(substrate_url, monkeypatch)
+        result = h.handler({"tags": ["climate"]}, None)
+        assert result["count"] >= 1
+        slugs = [d["slug"] for d in result["datasets"]]
+        assert "noaa-climate" in slugs
+        assert "ncbi-genome" not in slugs
+
+    def test_keyword_search_returns_relevant(self, substrate_url, reset_substrate, monkeypatch):
+        self._seed_catalog(substrate_url, _INTEG_ITEMS_DDB)
+        h = self._reload_search(substrate_url, monkeypatch)
+        # "marine coastal" infers the "oceans" tag → single-tag GSI query → returns noaa-ocean
+        result = h.handler({"query": "marine coastal salinity"}, None)
+        assert result["count"] >= 1
+        slugs = [d["slug"] for d in result["datasets"]]
+        assert "noaa-ocean" in slugs
+
+    def test_max_results_one(self, substrate_url, reset_substrate, monkeypatch):
+        self._seed_catalog(substrate_url, _INTEG_ITEMS_DDB)
+        h = self._reload_search(substrate_url, monkeypatch)
+        result = h.handler({"max_results": 1}, None)
+        assert result["count"] == 1
+
+    def test_format_filter_csv_only(self, substrate_url, reset_substrate, monkeypatch):
+        self._seed_catalog(substrate_url, _INTEG_ITEMS_DDB)
+        h = self._reload_search(substrate_url, monkeypatch)
+        result = h.handler({"format": "csv"}, None)
+        # noaa-climate (csv,parquet) and noaa-ocean (csv) match; ncbi-genome (vcf,bam) does not
+        assert result["count"] == 2
+        assert all("csv" in d["formats"] for d in result["datasets"])

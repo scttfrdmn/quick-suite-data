@@ -72,34 +72,52 @@ def handler(event: dict, context: Any) -> dict:
 
     bucket = source['bucket']
     base_prefix = source.get('prefix', '')
-    extra_prefix = event.get('prefix', '').lstrip('/')
-    if '..' in extra_prefix.split('/'):
-        return {'error': 'Access denied: prefix contains invalid path components.'}
-    full_prefix = base_prefix + extra_prefix
 
-    if base_prefix and not full_prefix.startswith(base_prefix):
-        return {'error': 'Access denied: prefix is outside configured source prefix.'}
+    # Support both single 'prefix' and list 'prefixes'
+    single_prefix = event.get('prefix', '').lstrip('/')
+    prefixes_raw = event.get('prefixes', [])
+    if prefixes_raw and isinstance(prefixes_raw, list):
+        extra_prefixes = [str(p).lstrip('/') for p in prefixes_raw]
+    else:
+        extra_prefixes = [single_prefix]
+
+    # Validate all prefixes
+    for ep in extra_prefixes:
+        if '..' in ep.split('/'):
+            return {'error': 'Access denied: prefix contains invalid path components.'}
+        full = base_prefix + ep
+        if base_prefix and not full.startswith(base_prefix):
+            return {'error': 'Access denied: prefix is outside configured source prefix.'}
 
     fmt = str(event.get('format') or '').lower()
-    custom_name = event.get('dataset_name', '') or f"{source_label}{' / ' + extra_prefix if extra_prefix else ''}"
+    display_prefix = extra_prefixes[0] if len(extra_prefixes) == 1 else f"{len(extra_prefixes)} prefixes"
+    custom_name = event.get('dataset_name', '') or f"{source_label}{' / ' + display_prefix if display_prefix else ''}"
     _raw_sample = event.get('sample_only', False)
     sample_only = _raw_sample.lower() in ("true", "1", "yes") if isinstance(_raw_sample, str) else bool(_raw_sample)
+    max_per_prefix = (10 if sample_only else MAX_MANIFEST_FILES) // max(len(extra_prefixes), 1)
 
-    # List files to build manifest
-    try:
-        files = _list_files(
-            bucket, full_prefix, fmt,
-            max_files=10 if sample_only else MAX_MANIFEST_FILES,
-        )
-    except Exception as e:
-        return {'error': f'Failed to list files: {e}'}
+    # List files across all prefixes to build a combined manifest
+    all_files = []
+    for ep in extra_prefixes:
+        full_prefix = base_prefix + ep
+        try:
+            prefix_files = _list_files(
+                bucket, full_prefix, fmt,
+                max_files=max_per_prefix,
+            )
+            all_files.extend(prefix_files)
+        except Exception as e:
+            return {'error': f'Failed to list files for prefix "{ep}": {e}'}
+    files = all_files
 
     if not files:
         return {
             'status': 'no_matching_files',
-            'message': f'No {fmt or "tabular"} files found in s3://{bucket}/{full_prefix}',
+            'message': f'No {fmt or "tabular"} files found in s3://{bucket}/ for the specified prefix(es)',
             'suggestion': 'Try a more specific prefix or different format.',
         }
+
+    extra_prefix = extra_prefixes[0] if len(extra_prefixes) == 1 else ''
 
     # Infer format from first file if not provided
     if not fmt:
@@ -145,6 +163,7 @@ def handler(event: dict, context: Any) -> dict:
         'datasetName': custom_name,
         'source': source_label,
         'prefix': extra_prefix,
+        'prefixCount': len(extra_prefixes),
         'fileCount': len(files),
         'format': fmt,
         'manifestUri': f's3://{MANIFEST_BUCKET}/{manifest_key}',
