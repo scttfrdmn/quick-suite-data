@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-04-02
+
+### Added
+- **Feature 14: Source registry** — new DynamoDB table `qs-data-source-registry` (PK: `source_id`, RETAIN removal policy) stores all data source metadata: type, connection_config, display_name, description, tags, data_classification, registered_at
+- **Feature 14: `register-source` Lambda** (internal) — validates and writes data source records to the registry table; validates `type` ∈ {s3, snowflake, redshift, roda} and `data_classification` ∈ {public, internal, restricted, phi}
+- **Feature 14: `use_source_registry` CDK context flag** — when true, `s3-browse` Lambda loads sources from DynamoDB registry (filtered by `type = "s3"`) instead of `SOURCES_CONFIG` env JSON; falls back to empty list if table unreachable
+- **Feature 14: SSM parameter** `/quick-suite/data/source-registry-arn` exports the registry table ARN for clAWS cross-stack integration
+- **Feature 13: Data quality signals in `roda_search`** — every result now includes a `quality_score` dict: `freshness` (current/aging/stale based on `last_updated` epoch), `schema_completeness` (fraction of 6 key fields present), `last_verified` (ISO timestamp written by catalog-quality-check or None)
+- **Feature 13: `catalog-quality-check` write-back** — after scanning each item, writes `last_verified` ISO timestamp and `quality_score` dict back to DynamoDB; same scoring formula as roda_search
+- **Feature 11: Snowflake connector** — `snowflake-browse` and `snowflake-preview` AgentCore Lambda tools; use Snowflake SQL API v2 via `urllib.request` + `base64` (no vendor SDK); schema/table name sanitization (alphanumeric + underscore only); `SNOWFLAKE_SECRET_ARN` CDK context var
+- **Feature 12: Redshift Serverless connector** — `redshift-browse` and `redshift-preview` AgentCore Lambda tools; use boto3 `redshift-data` client; poll-based execution (max 30s); schema/table name sanitization; `REDSHIFT_SECRET_ARN` CDK context var
+- **Feature 15: `federated_search` AgentCore tool** — searches across all registered source types (roda, s3, snowflake, redshift) in a single call; keyword scoring (match count / query word count, capped at 1.0); `data_classification_filter` support; unreachable sources reported in `skipped_sources`; results sorted by `match_score` descending
+
 ## [0.5.0] - 2026-04-02
 
 ### Added

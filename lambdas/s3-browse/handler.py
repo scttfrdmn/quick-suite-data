@@ -19,13 +19,49 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 s3 = boto3.client('s3')
+dynamodb = boto3.resource('dynamodb')
 
-# Loaded at cold start from env
-try:
-    _sources: list[dict] = json.loads(os.environ.get('SOURCES_CONFIG', '[]'))
-except json.JSONDecodeError as e:
-    logger.error(f"Invalid SOURCES_CONFIG JSON: {e}")
-    _sources = []
+_USE_SOURCE_REGISTRY = os.environ.get('USE_SOURCE_REGISTRY', '').lower() in ('true', '1', 'yes')
+_SOURCE_REGISTRY_TABLE = os.environ.get('SOURCE_REGISTRY_TABLE', '')
+
+
+def _load_sources_from_registry() -> list:
+    """Load S3 sources from DynamoDB source registry. Falls back to empty list on error."""
+    if not _SOURCE_REGISTRY_TABLE:
+        return []
+    try:
+        table = dynamodb.Table(_SOURCE_REGISTRY_TABLE)
+        resp = table.scan(
+            FilterExpression=boto3.dynamodb.conditions.Attr('type').eq('s3')
+        )
+        items = resp.get('Items', [])
+        sources = []
+        for item in items:
+            try:
+                conn = json.loads(item.get('connection_config', '{}'))
+            except (json.JSONDecodeError, TypeError):
+                conn = {}
+            sources.append({
+                'label': item.get('source_id', ''),
+                'bucket': conn.get('bucket', ''),
+                'prefix': conn.get('prefix', ''),
+                'description': conn.get('description', item.get('description', '')),
+            })
+        return sources
+    except Exception as e:
+        logger.warning(f"Failed to load sources from registry: {e}")
+        return []
+
+
+# Loaded at cold start
+if _USE_SOURCE_REGISTRY:
+    _sources: list[dict] = _load_sources_from_registry()
+else:
+    try:
+        _sources = json.loads(os.environ.get('SOURCES_CONFIG', '[]'))
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid SOURCES_CONFIG JSON: {e}")
+        _sources = []
 
 
 def handler(event: dict, context: Any) -> dict:

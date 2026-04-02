@@ -36,7 +36,12 @@ class _FakeTable:
 
     def scan(self, **kwargs):
         projection = kwargs.get("ProjectionExpression", "")
-        fields = [f.strip() for f in projection.split(",") if f.strip()]
+        expr_attr_names = kwargs.get("ExpressionAttributeNames", {})
+        # Resolve expression attribute name aliases (#n → actual name)
+        raw_fields = [f.strip() for f in projection.split(",") if f.strip()]
+        fields = []
+        for f in raw_fields:
+            fields.append(expr_attr_names.get(f, f))
         projected = []
         for item in self._items:
             if fields:
@@ -47,10 +52,18 @@ class _FakeTable:
 
     def update_item(self, Key, UpdateExpression, ExpressionAttributeValues):
         slug = Key["slug"]
-        # Parse simple SET expression
-        for k, v in ExpressionAttributeValues.items():
-            attr = UpdateExpression.split("SET", 1)[1].split("=")[0].strip()
-            self.updated[slug] = {attr: v}
+        # Parse SET expression — store all attribute→value pairs for this slug
+        attrs = {}
+        set_part = UpdateExpression.split("SET", 1)[1]
+        for assignment in set_part.split(","):
+            parts = assignment.split("=", 1)
+            if len(parts) == 2:
+                attr_name = parts[0].strip()
+                val_key = parts[1].strip()
+                attrs[attr_name] = ExpressionAttributeValues.get(val_key)
+        if slug not in self.updated:
+            self.updated[slug] = {}
+        self.updated[slug].update(attrs)
 
 
 class _FakeCW:
@@ -124,7 +137,7 @@ class TestCatalogQualityCheck:
         assert "old-dataset" in table.updated
 
     def test_recent_last_updated_not_stale(self):
-        """Item with recent last_updated → NOT marked stale."""
+        """Item with recent last_updated → NOT marked stale (but last_verified written)."""
         recent_ts = int(time.time()) - 86400  # 1 day ago
         items = [{"slug": "fresh-dataset", "last_updated": recent_ts}]
         mod, table, cw = _make_handler(items)
@@ -133,7 +146,9 @@ class TestCatalogQualityCheck:
 
         assert result["stale_count"] == 0
         assert result["scanned"] == 1
-        assert "fresh-dataset" not in table.updated
+        # last_verified written for all items (feature 13); stale flag NOT set
+        assert "last_verified" in table.updated.get("fresh-dataset", {})
+        assert "stale" not in table.updated.get("fresh-dataset", {})
 
     def test_boundary_exactly_two_years_is_stale(self):
         """Item with last_updated exactly at 2-year mark → stale (cutoff = now - 2yr, item < cutoff)."""
@@ -163,7 +178,8 @@ class TestCatalogQualityCheck:
         result = mod.handler({}, None)
 
         assert result["stale_count"] == 0
-        assert "under-boundary" not in table.updated
+        # last_verified written (feature 13), but stale NOT set
+        assert "stale" not in table.updated.get("under-boundary", {})
 
     def test_cloudwatch_metric_emitted(self):
         """StaleDatasets metric is published to CloudWatch with the stale count."""
@@ -194,10 +210,11 @@ class TestCatalogQualityCheck:
 
         assert result["scanned"] == 4
         assert result["stale_count"] == 2
-        assert "stale-b" in table.updated
-        assert "stale-c" in table.updated
-        assert "fresh-a" not in table.updated
-        assert "fresh-d" not in table.updated
+        assert "stale" in table.updated.get("stale-b", {})
+        assert "stale" in table.updated.get("stale-c", {})
+        # Fresh items get last_verified written but NOT stale flag
+        assert "stale" not in table.updated.get("fresh-a", {})
+        assert "stale" not in table.updated.get("fresh-d", {})
 
 
 class TestS3Reachability:
@@ -246,7 +263,8 @@ class TestS3Reachability:
         result = mod.handler({}, None)
 
         assert result["unreachable_count"] == 0
-        assert "live-bucket-dataset" not in table.updated
+        # last_verified is written for all items; unreachable NOT set
+        assert "unreachable" not in table.updated.get("live-bucket-dataset", {})
 
     def test_missing_s3_resources_skips_probe(self):
         """Item with no s3Resources → probe never called, unreachable_count = 0."""
@@ -262,3 +280,5 @@ class TestS3Reachability:
 
         assert result["unreachable_count"] == 0
         fake_s3.head_bucket.assert_not_called()
+        # last_verified is still written (quality score runs regardless of S3)
+        assert "last_verified" in table.updated.get("no-s3-resources", {})

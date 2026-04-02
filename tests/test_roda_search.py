@@ -9,6 +9,7 @@ import importlib
 import importlib.util
 import os
 import sys
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -417,3 +418,115 @@ class TestRodaSearchIntegration:
         # noaa-climate (csv,parquet) and noaa-ocean (csv) match; ncbi-genome (vcf,bam) does not
         assert result["count"] == 2
         assert all("csv" in d["formats"] for d in result["datasets"])
+
+
+# ---------------------------------------------------------------------------
+# Tests for Feature 13: quality_score in roda_search results
+# ---------------------------------------------------------------------------
+
+_SIX_MONTHS = 180 * 24 * 3600
+_TWO_YEARS = 2 * 365 * 24 * 3600
+
+
+class TestQualityScore:
+    """quality_score dict is present in every result and computed correctly."""
+
+    def test_quality_score_present_in_every_result(self):
+        table = _make_table(scan_items=ALL_ITEMS)
+        with _patch_table(table):
+            result = roda_search.handler({}, None)
+        for ds in result["datasets"]:
+            assert "quality_score" in ds
+            qs = ds["quality_score"]
+            assert "freshness" in qs
+            assert "schema_completeness" in qs
+            assert "last_verified" in qs
+
+    def test_freshness_stale_when_last_updated_three_years_ago(self):
+        three_years_ago = int(time.time()) - (3 * 365 * 24 * 3600)
+        stale_item = dict(CLIMATE_ITEM, last_updated=three_years_ago)
+        table = _make_table(scan_items=[stale_item])
+        with _patch_table(table):
+            result = roda_search.handler({}, None)
+        qs = result["datasets"][0]["quality_score"]
+        assert qs["freshness"] == "stale"
+
+    def test_freshness_current_when_last_updated_recent(self):
+        two_months_ago = int(time.time()) - (60 * 24 * 3600)
+        recent_item = dict(CLIMATE_ITEM, last_updated=two_months_ago)
+        table = _make_table(scan_items=[recent_item])
+        with _patch_table(table):
+            result = roda_search.handler({}, None)
+        qs = result["datasets"][0]["quality_score"]
+        assert qs["freshness"] == "current"
+
+    def test_freshness_stale_when_last_updated_missing(self):
+        item_no_updated = {k: v for k, v in CLIMATE_ITEM.items() if k != "last_updated"}
+        table = _make_table(scan_items=[item_no_updated])
+        with _patch_table(table):
+            result = roda_search.handler({}, None)
+        qs = result["datasets"][0]["quality_score"]
+        assert qs["freshness"] == "stale"
+
+    def test_freshness_aging_between_6_and_24_months(self):
+        twelve_months_ago = int(time.time()) - (365 * 24 * 3600)
+        aging_item = dict(CLIMATE_ITEM, last_updated=twelve_months_ago)
+        table = _make_table(scan_items=[aging_item])
+        with _patch_table(table):
+            result = roda_search.handler({}, None)
+        qs = result["datasets"][0]["quality_score"]
+        assert qs["freshness"] == "aging"
+
+    def test_schema_completeness_1_0_when_all_six_fields_present(self):
+        complete_item = {
+            "slug": "complete-ds",
+            "name": "Complete Dataset",
+            "description": "A dataset with all fields present",
+            "tags": ["tag1"],
+            "formats": ["csv"],
+            "s3Resources": [{"arn": "arn:aws:s3:::bucket", "region": "us-east-1"}],
+            "registryUrl": "https://registry.opendata.aws/complete/",
+            "primaryTag": "climate",
+            "searchText": "complete dataset",
+            "license": "Open",
+            "managedBy": "Test",
+            "updateFrequency": "Monthly",
+        }
+        table = _make_table(scan_items=[complete_item])
+        with _patch_table(table):
+            result = roda_search.handler({}, None)
+        qs = result["datasets"][0]["quality_score"]
+        assert qs["schema_completeness"] == 1.0
+
+    def test_schema_completeness_less_than_1_when_some_fields_missing(self):
+        partial_item = {
+            "slug": "partial-ds",
+            "name": "Partial Dataset",
+            # missing: description, tags, formats, s3Resources, registryUrl
+            "primaryTag": "climate",
+            "searchText": "partial dataset",
+        }
+        table = _make_table(scan_items=[partial_item])
+        with _patch_table(table):
+            result = roda_search.handler({}, None)
+        qs = result["datasets"][0]["quality_score"]
+        assert qs["schema_completeness"] < 1.0
+        assert qs["schema_completeness"] > 0.0
+
+    def test_last_verified_none_when_field_absent(self):
+        item_no_verified = dict(CLIMATE_ITEM)
+        item_no_verified.pop("last_verified", None)
+        table = _make_table(scan_items=[item_no_verified])
+        with _patch_table(table):
+            result = roda_search.handler({}, None)
+        qs = result["datasets"][0]["quality_score"]
+        assert qs["last_verified"] is None
+
+    def test_last_verified_returned_when_field_present(self):
+        verified_ts = "2026-01-15T10:00:00+00:00"
+        item_with_verified = dict(CLIMATE_ITEM, last_verified=verified_ts)
+        table = _make_table(scan_items=[item_with_verified])
+        with _patch_table(table):
+            result = roda_search.handler({}, None)
+        qs = result["datasets"][0]["quality_score"]
+        assert qs["last_verified"] == verified_ts

@@ -155,6 +155,9 @@ def handler(event: dict, context: Any) -> dict:
 
     results = results[:max_results]
     projected = [project_result(r) for r in results]
+    now_ts = time.time()
+    for i, item in enumerate(results):
+        projected[i]["quality_score"] = compute_quality_score(item, now_ts)
 
     # Encode next_token for pagination
     next_token = ''
@@ -340,6 +343,56 @@ def keyword_rank(items: list, keywords: list) -> list:
 # ---------------------------------------------------------------------------
 # Projection
 # ---------------------------------------------------------------------------
+
+_SIX_MONTHS_SECONDS = 180 * 24 * 3600
+_TWO_YEARS_SECONDS = 2 * 365 * 24 * 3600
+_SCHEMA_COMPLETENESS_FIELDS = ["name", "description", "tags", "formats", "s3Resources", "registryUrl"]
+
+
+def compute_quality_score(item: dict, now_ts: float | None = None) -> dict:
+    """
+    Compute a quality_score dict for a catalog item.
+
+    Returns:
+        {
+            "freshness": "current" | "aging" | "stale",
+            "schema_completeness": float,  # 0.0–1.0
+            "last_verified": str | None,
+        }
+    """
+    if now_ts is None:
+        now_ts = time.time()
+
+    last_updated = item.get("last_updated")
+    if last_updated is None:
+        freshness = "stale"
+    else:
+        try:
+            age = now_ts - float(last_updated)
+            if age < _SIX_MONTHS_SECONDS:
+                freshness = "current"
+            elif age < _TWO_YEARS_SECONDS:
+                freshness = "aging"
+            else:
+                freshness = "stale"
+        except (TypeError, ValueError):
+            freshness = "stale"
+
+    present = 0
+    for field in _SCHEMA_COMPLETENESS_FIELDS:
+        val = item.get(field)
+        if val is not None and val != "" and val != [] and val != {}:
+            present += 1
+    schema_completeness = present / len(_SCHEMA_COMPLETENESS_FIELDS)
+
+    last_verified = item.get("last_verified") or None
+
+    return {
+        "freshness": freshness,
+        "schema_completeness": schema_completeness,
+        "last_verified": last_verified,
+    }
+
 
 def project_result(item: dict) -> dict:
     s3_resources = item.get('s3Resources', [])

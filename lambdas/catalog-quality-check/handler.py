@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 
 import boto3
 from botocore import UNSIGNED
@@ -32,6 +33,39 @@ cw = boto3.client("cloudwatch")
 s3_anon = boto3.client("s3", config=Config(signature_version=UNSIGNED))
 
 TWO_YEARS_SECONDS = 2 * 365 * 24 * 3600
+SIX_MONTHS_SECONDS = 180 * 24 * 3600
+SCHEMA_COMPLETENESS_FIELDS = ["name", "description", "tags", "formats", "s3Resources", "registryUrl"]
+
+
+def _compute_quality_score(item: dict, now: int) -> dict:
+    """Compute quality_score dict for a catalog item (same formula as roda-search)."""
+    last_updated = item.get("last_updated")
+    if last_updated is None:
+        freshness = "stale"
+    else:
+        try:
+            age = now - float(last_updated)
+            if age < SIX_MONTHS_SECONDS:
+                freshness = "current"
+            elif age < TWO_YEARS_SECONDS:
+                freshness = "aging"
+            else:
+                freshness = "stale"
+        except (TypeError, ValueError):
+            freshness = "stale"
+
+    present = 0
+    for field in SCHEMA_COMPLETENESS_FIELDS:
+        val = item.get(field)
+        if val is not None and val != "" and val != [] and val != {}:
+            present += 1
+    schema_completeness = present / len(SCHEMA_COMPLETENESS_FIELDS)
+
+    return {
+        "freshness": freshness,
+        "schema_completeness": schema_completeness,
+        "last_verified": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def _probe_s3_resources(s3_resources: list) -> bool:
@@ -72,7 +106,10 @@ def handler(event, context):
 
     while True:
         scan_kwargs = {
-            "ProjectionExpression": "slug, last_updated, s3Resources",
+            "ProjectionExpression": (
+                "slug, last_updated, s3Resources, #n, description, tags, formats, registryUrl"
+            ),
+            "ExpressionAttributeNames": {"#n": "name"},
         }
         if last_key:
             scan_kwargs["ExclusiveStartKey"] = last_key
@@ -88,13 +125,35 @@ def handler(event, context):
             last_updated = item.get("last_updated")
             is_stale = (last_updated is None) or (int(last_updated) < cutoff)
 
+            quality_score = _compute_quality_score(item, now)
+            verified_at = quality_score["last_verified"]
+
             if is_stale:
                 stale_count += 1
                 try:
                     table.update_item(
                         Key={"slug": item["slug"]},
-                        UpdateExpression="SET stale = :v",
-                        ExpressionAttributeValues={":v": True},
+                        UpdateExpression=(
+                            "SET stale = :stale, last_verified = :lv, quality_score = :qs"
+                        ),
+                        ExpressionAttributeValues={
+                            ":stale": True,
+                            ":lv": verified_at,
+                            ":qs": quality_score,
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning(json.dumps({"update_error": str(exc), "slug": item["slug"]}))
+            else:
+                # Always write back last_verified and quality_score even for non-stale items
+                try:
+                    table.update_item(
+                        Key={"slug": item["slug"]},
+                        UpdateExpression="SET last_verified = :lv, quality_score = :qs",
+                        ExpressionAttributeValues={
+                            ":lv": verified_at,
+                            ":qs": quality_score,
+                        },
                     )
                 except Exception as exc:
                     logger.warning(json.dumps({"update_error": str(exc), "slug": item["slug"]}))

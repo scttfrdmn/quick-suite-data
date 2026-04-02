@@ -482,13 +482,198 @@ class OpenDataStack(Stack):
         )
 
         # -----------------------------------------------------------------
+        # DynamoDB: Source Registry (Feature 14)
+        # -----------------------------------------------------------------
+        source_registry_table = dynamodb.Table(
+            self,
+            "SourceRegistry",
+            table_name="qs-data-source-registry",
+            partition_key=dynamodb.Attribute(
+                name="source_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.RETAIN,
+        )
+
+        # CDK migration flag — when true, s3-browse loads sources from DynamoDB
+        use_source_registry = self.node.try_get_context("use_source_registry") or False
+        if use_source_registry:
+            browse_fn.add_environment("USE_SOURCE_REGISTRY", "true")
+            browse_fn.add_environment("SOURCE_REGISTRY_TABLE", source_registry_table.table_name)
+            source_registry_table.grant_read_data(browse_fn)
+
+        # SSM parameter for clAWS cross-stack integration
+        ssm.StringParameter(
+            self,
+            "SourceRegistryArnParam",
+            parameter_name="/quick-suite/data/source-registry-arn",
+            string_value=source_registry_table.table_arn,
+            description="Source registry DynamoDB table ARN for clAWS cross-stack integration",
+        )
+
+        # -----------------------------------------------------------------
+        # Lambda: Register Source (internal — not an AgentCore tool)
+        # -----------------------------------------------------------------
+        register_source_fn = lambda_.Function(
+            self,
+            "RegisterSource",
+            function_name=f"{prefix}-register-source",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="handler.handler",
+            code=lambda_.Code.from_asset("lambdas/register-source"),
+            timeout=Duration.seconds(30),
+            memory_size=128,
+            environment={
+                "SOURCE_REGISTRY_TABLE": source_registry_table.table_name,
+            },
+        )
+        source_registry_table.grant_write_data(register_source_fn)
+
+        # -----------------------------------------------------------------
+        # Lambda: Snowflake Browse + Preview (AgentCore tools)
+        # -----------------------------------------------------------------
+        snowflake_secret_arn = self.node.try_get_context("snowflake_secret_arn") or ""
+
+        snowflake_browse_fn = lambda_.Function(
+            self,
+            "SnowflakeBrowse",
+            function_name=f"{prefix}-snowflake-browse",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="handler.handler",
+            code=lambda_.Code.from_asset("lambdas/snowflake-browse"),
+            timeout=Duration.seconds(30),
+            memory_size=128,
+            environment={
+                "SNOWFLAKE_SECRET_ARN": snowflake_secret_arn,
+            },
+        )
+
+        snowflake_preview_fn = lambda_.Function(
+            self,
+            "SnowflakePreview",
+            function_name=f"{prefix}-snowflake-preview",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="handler.handler",
+            code=lambda_.Code.from_asset("lambdas/snowflake-preview"),
+            timeout=Duration.seconds(30),
+            memory_size=128,
+            environment={
+                "SNOWFLAKE_SECRET_ARN": snowflake_secret_arn,
+            },
+        )
+
+        if snowflake_secret_arn:
+            for fn in [snowflake_browse_fn, snowflake_preview_fn]:
+                fn.add_to_role_policy(
+                    iam.PolicyStatement(
+                        actions=["secretsmanager:GetSecretValue"],
+                        resources=[snowflake_secret_arn],
+                    )
+                )
+
+        # -----------------------------------------------------------------
+        # Lambda: Redshift Browse + Preview (AgentCore tools)
+        # -----------------------------------------------------------------
+        redshift_secret_arn = self.node.try_get_context("redshift_secret_arn") or ""
+
+        redshift_browse_fn = lambda_.Function(
+            self,
+            "RedshiftBrowse",
+            function_name=f"{prefix}-redshift-browse",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="handler.handler",
+            code=lambda_.Code.from_asset("lambdas/redshift-browse"),
+            timeout=Duration.seconds(60),
+            memory_size=128,
+            environment={
+                "REDSHIFT_SECRET_ARN": redshift_secret_arn,
+            },
+        )
+
+        redshift_preview_fn = lambda_.Function(
+            self,
+            "RedshiftPreview",
+            function_name=f"{prefix}-redshift-preview",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="handler.handler",
+            code=lambda_.Code.from_asset("lambdas/redshift-preview"),
+            timeout=Duration.seconds(60),
+            memory_size=128,
+            environment={
+                "REDSHIFT_SECRET_ARN": redshift_secret_arn,
+            },
+        )
+
+        redshift_data_policy = iam.PolicyStatement(
+            actions=[
+                "redshift-data:ExecuteStatement",
+                "redshift-data:DescribeStatement",
+                "redshift-data:GetStatementResult",
+            ],
+            resources=["*"],
+        )
+        for fn in [redshift_browse_fn, redshift_preview_fn]:
+            fn.add_to_role_policy(redshift_data_policy)
+            if redshift_secret_arn:
+                fn.add_to_role_policy(
+                    iam.PolicyStatement(
+                        actions=["secretsmanager:GetSecretValue"],
+                        resources=[redshift_secret_arn],
+                    )
+                )
+
+        # -----------------------------------------------------------------
+        # Lambda: Federated Search (AgentCore tool)
+        # -----------------------------------------------------------------
+        federated_search_fn = lambda_.Function(
+            self,
+            "FederatedSearch",
+            function_name=f"{prefix}-federated-search",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="handler.handler",
+            code=lambda_.Code.from_asset("lambdas/federated-search"),
+            timeout=Duration.seconds(60),
+            memory_size=256,
+            environment={
+                "REGISTRY_TABLE": source_registry_table.table_name,
+                "CATALOG_TABLE": catalog_table.table_name,
+                "SNOWFLAKE_SECRET_ARN": snowflake_secret_arn,
+                "REDSHIFT_SECRET_ARN": redshift_secret_arn,
+            },
+        )
+        source_registry_table.grant_read_data(federated_search_fn)
+        catalog_table.grant_read_data(federated_search_fn)
+        federated_search_fn.add_to_role_policy(redshift_data_policy)
+        if snowflake_secret_arn:
+            federated_search_fn.add_to_role_policy(
+                iam.PolicyStatement(
+                    actions=["secretsmanager:GetSecretValue"],
+                    resources=[snowflake_secret_arn],
+                )
+            )
+        if redshift_secret_arn:
+            federated_search_fn.add_to_role_policy(
+                iam.PolicyStatement(
+                    actions=["secretsmanager:GetSecretValue"],
+                    resources=[redshift_secret_arn],
+                )
+            )
+
+        # -----------------------------------------------------------------
         # AgentCore Gateway permission
         # Allow the AgentCore Gateway execution role to invoke tool Lambdas.
         # Set agentcore_gateway_role_arn context or add manually post-deploy.
         # -----------------------------------------------------------------
         gateway_role_arn = self.node.try_get_context("agentcore_gateway_role_arn")
+        _new_tool_fns = [
+            snowflake_browse_fn,
+            snowflake_preview_fn,
+            redshift_browse_fn,
+            redshift_preview_fn,
+            federated_search_fn,
+        ]
         if gateway_role_arn:
-            for fn in [search_fn, loader_fn, browse_fn, preview_fn, s3_load_fn]:
+            for fn in [search_fn, loader_fn, browse_fn, preview_fn, s3_load_fn] + _new_tool_fns:
                 fn.add_permission(
                     "AgentCoreInvoke",
                     principal=iam.ArnPrincipal(gateway_role_arn),
@@ -504,6 +689,11 @@ class OpenDataStack(Stack):
             "s3_browse": browse_fn.function_arn,
             "s3_preview": preview_fn.function_arn,
             "s3_load": s3_load_fn.function_arn,
+            "snowflake_browse": snowflake_browse_fn.function_arn,
+            "snowflake_preview": snowflake_preview_fn.function_arn,
+            "redshift_browse": redshift_browse_fn.function_arn,
+            "redshift_preview": redshift_preview_fn.function_arn,
+            "federated_search": federated_search_fn.function_arn,
         }
 
         for tool_name, arn_value in tool_arns.items():
