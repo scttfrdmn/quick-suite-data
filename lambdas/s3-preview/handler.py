@@ -70,7 +70,10 @@ def handler(event: dict, context: Any) -> dict:
     base_prefix = source.get('prefix', '')
     if '..' in key.lstrip('/').split('/'):
         return {'error': 'Access denied: key contains invalid path components.'}
-    full_key = base_prefix + key.lstrip('/')
+    # Accept both full S3 keys (as returned by s3_browse) and prefix-relative keys.
+    full_key = key.lstrip('/')
+    if base_prefix and not full_key.startswith(base_prefix):
+        full_key = base_prefix + full_key
 
     if base_prefix and not full_key.startswith(base_prefix):
         return {'error': 'Access denied: key is outside configured source prefix.'}
