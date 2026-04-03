@@ -1,0 +1,52 @@
+name: roda-discovery
+display_name: "RODA Dataset Discovery and Load"
+description: |
+  A self-contained quick-suite-data example. Searches the RODA catalog for
+  NOAA climate data, loads the first result into Quick Sight, then browses
+  the registered S3 source to confirm the data is accessible.
+
+  Demonstrates: roda_search → roda_load → s3_browse.
+category: data-pipeline
+requires:
+  stacks: [data]
+  setup: "No setup required — uses public RODA data and the deployed QuickSuiteOpenData stack."
+
+steps:
+  - id: search
+    tool: roda_search
+    stack: data
+    description: "Search the RODA catalog for NOAA climate datasets"
+    input:
+      query: "NOAA climate temperature weather"
+      max_results: 5
+      exclude_deprecated: true
+    assert:
+      - path: "count"
+        op: gte
+        value: 1
+      - path: "datasets"
+        op: exists
+
+  - id: load
+    tool: roda_load
+    stack: data
+    description: "Load the first result into Quick Sight"
+    input:
+      dataset_slug: "{search.datasets.0.slug}"
+    assert:
+      - path: "dataset_id"
+        op: exists
+      - path: "source_id"
+        op: exists
+
+  - id: browse
+    tool: s3_browse
+    stack: data
+    description: "Browse the source S3 bucket to confirm data is accessible"
+    input:
+      source_id: "noaa-ghcn-pds"
+      prefix: ""
+      max_keys: 10
+    assert:
+      - path: "objects"
+        op: exists
