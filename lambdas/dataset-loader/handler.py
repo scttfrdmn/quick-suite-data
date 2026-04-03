@@ -42,6 +42,7 @@ CLAWS_LOOKUP_TABLE = os.environ.get('CLAWS_LOOKUP_TABLE', '')
 
 QS_DIRECT_FORMATS = {'csv', 'tsv', 'parquet', 'json'}
 MAX_MANIFEST_FILES = 200
+_MAX_PROBE_PAGES = 20  # cap S3 listing at 20 pages (20 * 1000 = 20k objects)
 
 
 def handler(event: dict, context: Any) -> dict:
@@ -123,6 +124,19 @@ def handler(event: dict, context: Any) -> dict:
             if preferred in detected_formats:
                 format_hint = preferred
                 break
+
+    # Early exit: catalog says no QS-compatible formats exist — avoid expensive S3 listing
+    if detected_formats and not QS_DIRECT_FORMATS.intersection(set(detected_formats)):
+        return {
+            'status': 'requires_transform',
+            'message': f'Dataset formats {detected_formats} are not directly supported by '
+                       f'Quick Sight. Route through the compute layer (EMR Serverless or '
+                       f'Lambda) to convert to Parquet first.',
+            'dataset': item.get('name', ''),
+            'bucket': bucket_name,
+            'detectedFormats': detected_formats,
+            'registryUrl': item.get('registryUrl', ''),
+        }
 
     if format_hint and format_hint not in QS_DIRECT_FORMATS:
         return {
@@ -305,13 +319,18 @@ def _probe_bucket(
     matching = []
     paginator = s3.get_paginator('list_objects_v2')
 
+    page_count = 0
     for page in paginator.paginate(**list_kwargs):
+        page_count += 1
         for obj in page.get('Contents', []):
             key = obj['Key']
             if any(key.lower().endswith(ext) for ext in extensions):
                 matching.append(key)
                 if len(matching) >= max_files:
                     return matching
+        if page_count >= _MAX_PROBE_PAGES:
+            logger.warning(f"Probe hit page cap ({_MAX_PROBE_PAGES}) for bucket={bucket}")
+            break
 
     return matching
 
