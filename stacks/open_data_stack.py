@@ -695,6 +695,48 @@ class OpenDataStack(Stack):
                 )
 
         # -----------------------------------------------------------------
+        # Lambda: IPEDS Search (AgentCore tool — public API, no secrets)
+        # -----------------------------------------------------------------
+        ipeds_search_fn = lambda_.Function(
+            self,
+            "IpedsSearch",
+            function_name=f"{prefix}-ipeds-search",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="handler.handler",
+            code=lambda_.Code.from_asset("lambdas/ipeds-search"),
+            timeout=Duration.seconds(30),
+            memory_size=128,
+        )
+
+        # -----------------------------------------------------------------
+        # Lambda: NIH Reporter Search (AgentCore tool — public API, no secrets)
+        # -----------------------------------------------------------------
+        nih_reporter_search_fn = lambda_.Function(
+            self,
+            "NihReporterSearch",
+            function_name=f"{prefix}-nih-reporter-search",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="handler.handler",
+            code=lambda_.Code.from_asset("lambdas/nih-reporter-search"),
+            timeout=Duration.seconds(30),
+            memory_size=128,
+        )
+
+        # -----------------------------------------------------------------
+        # Lambda: NSF Awards Search (AgentCore tool — public API, no secrets)
+        # -----------------------------------------------------------------
+        nsf_awards_search_fn = lambda_.Function(
+            self,
+            "NsfAwardsSearch",
+            function_name=f"{prefix}-nsf-awards-search",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="handler.handler",
+            code=lambda_.Code.from_asset("lambdas/nsf-awards-search"),
+            timeout=Duration.seconds(30),
+            memory_size=128,
+        )
+
+        # -----------------------------------------------------------------
         # Lambda: Federated Search (AgentCore tool)
         # -----------------------------------------------------------------
         federated_search_fn = lambda_.Function(
@@ -743,6 +785,9 @@ class OpenDataStack(Stack):
             redshift_browse_fn,
             redshift_preview_fn,
             federated_search_fn,
+            ipeds_search_fn,
+            nih_reporter_search_fn,
+            nsf_awards_search_fn,
         ]
         if gateway_role_arn:
             for fn in [search_fn, loader_fn, browse_fn, preview_fn, s3_load_fn] + _new_tool_fns:
@@ -762,6 +807,7 @@ class OpenDataStack(Stack):
                 snowflake_browse_fn, snowflake_preview_fn,
                 redshift_browse_fn, redshift_preview_fn,
                 federated_search_fn,
+                ipeds_search_fn, nih_reporter_search_fn, nsf_awards_search_fn,
             ]
             for fn in _all_lambda_fns:
                 cmk.grant(fn.grant_principal, "kms:Decrypt", "kms:GenerateDataKey")
@@ -780,6 +826,9 @@ class OpenDataStack(Stack):
             "redshift_browse": redshift_browse_fn.function_arn,
             "redshift_preview": redshift_preview_fn.function_arn,
             "federated_search": federated_search_fn.function_arn,
+            "ipeds_search": ipeds_search_fn.function_arn,
+            "nih_reporter_search": nih_reporter_search_fn.function_arn,
+            "nsf_awards_search": nsf_awards_search_fn.function_arn,
         }
 
         for tool_name, arn_value in tool_arns.items():

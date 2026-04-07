@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-04-07
+
+### Added
+- **Issue #41: `ipeds_search` tool** — New AgentCore Lambda target (`lambdas/ipeds-search/handler.py`). Searches IPEDS institutional data via the Urban Institute Education Data Portal API (`educationdata.urban.org`). Public API, no authentication. Accepts `query` (required), `survey` (optional: `graduation_rates|enrollment|retention|finance`), `year_range` (optional, informational), `max_results` (default 20, max 50). Returns `{source_type: "ipeds", results: [...], count: N}` with `source_id`, `display_name`, `series_slug`, `year_range`, `description`, `match_score`.
+- **Issue #42: `nih_reporter_search` tool** — New AgentCore Lambda target (`lambdas/nih-reporter-search/handler.py`). Searches NIH-funded research grants via NIH Reporter API v2 (`POST /v2/projects/search`). Public API, no authentication. Accepts `query`, `fiscal_year`, `institution`, `pi_name`, `max_results`. Returns `core_project_num`, `project_title`, `pi_names`, `fiscal_year`, `award_amount`, `abstract_text` (first 500 chars).
+- **Issue #43: `nsf_awards_search` tool** — New AgentCore Lambda target (`lambdas/nsf-awards-search/handler.py`). Searches NSF awards via NSF Award Search API (`api.nsf.gov/services/v1/awards.json`). Public API, no authentication. Accepts `query`, `date_start`, `date_end`, `pi_name`, `max_results`. Returns `award_id`, `pi_name`, `awardee_name`, `start_date`, `exp_date`, `funds_obligated_amt`, `abstract_text`.
+- **federated_search dispatch extensions** — `_search_ipeds()`, `_search_nih_reporter()`, `_search_nsf_awards()` added to `lambdas/federated-search/handler.py`; registered in `_search_fn` dict under keys `"ipeds"`, `"nih_reporter"`, `"nsf_awards"`.
+- **CDK** — Three new Lambda constructs (`IpedsSearch`, `NihReporterSearch`, `NsfAwardsSearch`) added to `stacks/open_data_stack.py`; included in `_new_tool_fns` (AgentCore Gateway invoke permissions), KMS grant list, and `tool_arns` CloudFormation output.
+
+### Tests
+- 25 new tests in `tests/test_research_sources.py`:
+  - `TestIpedsSearch` (7): happy path, empty query, max_results cap, empty API response, invalid survey, valid survey accepted, API error returns empty results
+  - `TestNihReporterSearch` (8): happy path, empty query, fiscal_year in request, empty results, invalid fiscal_year, max_results cap, API error, abstract truncated to 500 chars
+  - `TestNsfAwardsSearch` (5): happy path, empty query, pi_name filter in URL, empty response, API error
+  - `TestFederatedSearchResearchSources` (4): IPEDS dispatch, NIH Reporter dispatch, NSF Awards dispatch, unknown source type silently skipped
+
 ## [0.9.0] - 2026-04-07
 
 ### Security

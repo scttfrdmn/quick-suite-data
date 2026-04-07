@@ -11,6 +11,9 @@ merges and ranks results by keyword match score.
 import json
 import logging
 import os
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Any
 
 import boto3
@@ -171,6 +174,120 @@ def _search_snowflake(query_words: list, source: dict) -> list:
     return results
 
 
+def _search_ipeds(query_words: list, source: dict) -> list:
+    """Search IPEDS via Urban Institute Education Data Portal (public API, no auth)."""
+    query = " ".join(query_words)
+    if not query:
+        return []
+
+    params = {"keyword": query, "page[size]": 20}
+    url = "https://educationdata.urban.org/api/v1/college-university/ipeds/variables/?" + urllib.parse.urlencode(params)
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "quick-suite-data/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.warning(json.dumps({"ipeds_error": str(e)}))
+        raise
+
+    items = data if isinstance(data, list) else data.get("results", data.get("data", []))
+    results = []
+    for item in items[:20]:
+        var_name = item.get("varTitle") or item.get("varname") or item.get("label") or ""
+        description = item.get("definition") or item.get("description") or ""
+        text = (var_name + " " + description).lower()
+        matches = sum(1 for w in query_words if w in text)
+        score = min(matches / len(query_words), 1.0) if query_words else 0.0
+        if score > 0:
+            results.append({
+                "source_id": source.get("source_id", f"ipeds/{var_name}"),
+                "source_type": "ipeds",
+                "display_name": var_name or "IPEDS variable",
+                "match_score": score,
+                "description": description[:200],
+                "quality_score": None,
+            })
+    return results
+
+
+def _search_nih_reporter(query_words: list, source: dict) -> list:
+    """Search NIH Reporter v2 API (public API, no auth)."""
+    query = " ".join(query_words)
+    if not query:
+        return []
+
+    body = {
+        "criteria": {"text_search": {"operator": "and", "search_field": "all", "terms": query}},
+        "limit": 20, "offset": 0,
+        "fields": ["ProjectNum", "ProjectTitle", "PiNames", "FiscalYear", "AwardAmount", "AbstractText"],
+    }
+    body_bytes = json.dumps(body).encode("utf-8")
+    try:
+        req = urllib.request.Request(
+            "https://api.reporter.nih.gov/v2/projects/search",
+            data=body_bytes, method="POST",
+            headers={"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "quick-suite-data/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.warning(json.dumps({"nih_reporter_error": str(e)}))
+        raise
+
+    results = []
+    for item in data.get("results", [])[:20]:
+        title = item.get("ProjectTitle") or ""
+        abstract = (item.get("AbstractText") or "")[:200]
+        text = (title + " " + abstract).lower()
+        matches = sum(1 for w in query_words if w in text)
+        score = min(matches / len(query_words), 1.0) if query_words else 0.0
+        if score > 0:
+            results.append({
+                "source_id": source.get("source_id", f"nih/{item.get('ProjectNum', '')}"),
+                "source_type": "nih_reporter",
+                "display_name": title,
+                "match_score": score,
+                "description": abstract,
+                "quality_score": None,
+            })
+    return results
+
+
+def _search_nsf_awards(query_words: list, source: dict) -> list:
+    """Search NSF Award Search API (public API, no auth)."""
+    query = " ".join(query_words)
+    if not query:
+        return []
+
+    params = {"keyword": query, "printFields": "id,title,piFirstName,piLastName,awardeeName,abstractText", "rows": 20}
+    url = "https://api.nsf.gov/services/v1/awards.json?" + urllib.parse.urlencode(params)
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "quick-suite-data/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.warning(json.dumps({"nsf_error": str(e)}))
+        raise
+
+    results = []
+    for item in data.get("response", {}).get("award", [])[:20]:
+        title = item.get("title") or ""
+        abstract = (item.get("abstractText") or "")[:200]
+        text = (title + " " + abstract).lower()
+        matches = sum(1 for w in query_words if w in text)
+        score = min(matches / len(query_words), 1.0) if query_words else 0.0
+        if score > 0:
+            results.append({
+                "source_id": source.get("source_id", f"nsf/{item.get('id', '')}"),
+                "source_type": "nsf_awards",
+                "display_name": title,
+                "match_score": score,
+                "description": abstract,
+                "quality_score": None,
+            })
+    return results
+
+
 def _search_redshift(query_words: list, source: dict) -> list:
     """List Redshift tables and match names against query words."""
     import time
@@ -303,6 +420,9 @@ def handler(event: dict, context: Any) -> dict:
         "s3": _search_s3,
         "snowflake": _search_snowflake,
         "redshift": _search_redshift,
+        "ipeds": _search_ipeds,
+        "nih_reporter": _search_nih_reporter,
+        "nsf_awards": _search_nsf_awards,
     }
 
     for source in sources:
