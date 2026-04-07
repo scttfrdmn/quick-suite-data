@@ -33,8 +33,21 @@ except json.JSONDecodeError as e:
     logger.error(f"Invalid SOURCES_CONFIG JSON: {e}")
     _sources = []
 
+if not _sources:
+    logger.warning(json.dumps({
+        "level": "WARN",
+        "msg": "No S3 sources configured — set SOURCES_CONFIG. "
+               "All preview requests will return 'source not found'.",
+    }))
+
 # Max bytes to download for schema inference (avoid downloading huge files)
 MAX_PREVIEW_BYTES = 512 * 1024  # 512 KB
+
+# Allowlist of supported file extensions — enforced before any file read (#58)
+_ALLOWED_EXTENSIONS = frozenset({
+    ".parquet", ".csv", ".csv.gz", ".tsv", ".tsv.gz",
+    ".json", ".json.gz", ".jsonl", ".ndjson",
+})
 
 
 def handler(event: dict, context: Any) -> dict:
@@ -79,6 +92,21 @@ def handler(event: dict, context: Any) -> dict:
         return {'error': 'Access denied: key is outside configured source prefix.'}
 
     fmt = str(event.get('format') or '').lower() or detect_format_from_key(full_key)
+
+    # Validate file extension against allowlist before any S3 read (#58)
+    key_lower = full_key.lower()
+    matched_ext = next(
+        (ext for ext in sorted(_ALLOWED_EXTENSIONS, key=len, reverse=True)
+         if key_lower.endswith(ext)),
+        None,
+    )
+    if not matched_ext:
+        suffix = key_lower.rsplit(".", 1)[-1] if "." in key_lower else "(none)"
+        return {
+            "error": f'Unsupported file type ".{suffix}". '
+                     f"Supported extensions: {sorted(_ALLOWED_EXTENSIONS)}",
+        }
+
     try:
         _max_rows = int(event.get('max_rows', 5))
     except (TypeError, ValueError):
@@ -94,7 +122,8 @@ def handler(event: dict, context: Any) -> dict:
     except s3.exceptions.NoSuchKey:
         return {'error': f'Key "{key}" not found in source "{source_label}".'}
     except Exception as e:
-        return {'error': f'Failed to access object: {e}'}
+        logger.error(f"s3_preview head_object failed: {e}")
+        return {'error': 'Failed to access object metadata'}  # sanitized (#59)
 
     # Download a prefix of the file for schema inference
     if size_bytes == 0:
@@ -109,7 +138,7 @@ def handler(event: dict, context: Any) -> dict:
         content = resp['Body'].read()
     except Exception as e:
         logger.error(f"s3_preview download failed: {e}")
-        return {'error': f'Failed to download preview: {e}'}
+        return {'error': 'Failed to download file preview'}  # sanitized (#59)
 
     schema = infer_schema_from_bytes(content, fmt)
 

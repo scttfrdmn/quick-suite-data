@@ -121,7 +121,7 @@ class TestSnowflakeBrowse:
             with patch("urllib.request.urlopen", side_effect=http_err):
                 result = sf_browse.handler({"source_id": "sf-prod"}, None)
         assert "error" in result
-        assert "Snowflake API error" in result["error"]
+        assert "Snowflake query failed" in result["error"]  # sanitized (#59)
 
     def test_missing_secret_returns_error(self):
         """When SNOWFLAKE_SECRET_ARN is empty, should return error immediately."""
@@ -210,6 +210,20 @@ class TestSnowflakePreview:
         body = json.loads(request_obj.data.decode("utf-8"))
         assert "LIMIT 25" in body["statement"]
         assert result["row_count"] == 25
+
+    def test_sql_uses_quoted_identifiers(self):
+        """SQL must double-quote schema and table names (defence-in-depth against injection)."""
+        url_resp = _make_urlopen_response(_PREVIEW_RESULT)
+        with _mock_secret(sf_preview):
+            with patch("urllib.request.urlopen", return_value=url_resp) as mock_url:
+                sf_preview.handler(
+                    {"source_id": "sf-prod", "schema": "PUBLIC", "table": "ORDERS"},
+                    None,
+                )
+        body = json.loads(mock_url.call_args[0][0].data.decode("utf-8"))
+        assert '"PUBLIC"."ORDERS"' in body["statement"], (
+            f"Expected quoted identifiers in SQL; got: {body['statement']}"
+        )
 
     def test_source_id_required(self):
         with _mock_secret(sf_preview):

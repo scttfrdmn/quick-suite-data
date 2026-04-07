@@ -167,6 +167,17 @@ class TestS3Browse:
             result = _s3_browse.handler({}, None)
         assert result["count"] == 0
 
+    def test_source_request_with_no_sources_returns_error_not_s3_access(self):
+        """When no sources are configured, requesting a source must return an error
+        without making any S3 API call (fail-closed — issue #50)."""
+        mock_s3 = MagicMock()
+        with patch.object(_s3_browse, "_sources", []), \
+             patch.object(_s3_browse, "s3", mock_s3):
+            result = _s3_browse.handler({"source": "any-source"}, None)
+        assert "error" in result
+        assert "not found" in result["error"]
+        mock_s3.list_objects_v2.assert_not_called()
+
 
 # ===========================================================================
 # s3_preview

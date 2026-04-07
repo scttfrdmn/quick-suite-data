@@ -99,7 +99,7 @@ def handler(event: dict, context: Any) -> dict:
         statement_id = exec_resp["Id"]
     except Exception as e:
         logger.error(json.dumps({"redshift_error": str(e)}))
-        return {"error": f"Redshift execute failed: {e}"}
+        return {"error": "Redshift query could not be submitted"}  # sanitized (#59)
 
     try:
         final = _poll_statement(statement_id)
@@ -107,18 +107,18 @@ def handler(event: dict, context: Any) -> dict:
         return {"error": "Redshift query timed out"}
     except Exception as e:
         logger.error(json.dumps({"poll_error": str(e)}))
-        return {"error": f"Redshift poll failed: {e}"}
+        return {"error": "Redshift query status check failed"}  # sanitized (#59)
 
     status = final.get("Status", "")
     if status in ("FAILED", "ABORTED"):
-        err = final.get("Error", "unknown error")
-        return {"error": f"Redshift query failed: {err}"}
+        logger.error(json.dumps({"redshift_query_status": status, "detail": final.get("Error", "")}))
+        return {"error": "Redshift query failed"}  # sanitized (#59)
 
     try:
         result = redshift_data.get_statement_result(Id=statement_id)
     except Exception as e:
         logger.error(json.dumps({"get_result_error": str(e)}))
-        return {"error": f"Redshift get result failed: {e}"}
+        return {"error": "Failed to retrieve Redshift query results"}  # sanitized (#59)
 
     records = result.get("Records", [])
     tables = []
@@ -130,8 +130,7 @@ def handler(event: dict, context: Any) -> dict:
 
     return {
         "source_id": source_id,
-        "workgroup": workgroup,
-        "database": database,
+        # workgroup omitted — do not expose infrastructure identifiers (#56, #59)
         "tables": tables,
         "count": len(tables),
     }

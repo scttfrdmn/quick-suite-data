@@ -143,7 +143,9 @@ class OpenDataStack(Stack):
                 name="slug", type=dynamodb.AttributeType.STRING
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=RemovalPolicy.DESTROY,
+            removal_policy=RemovalPolicy.RETAIN,   # protect catalog from accidental delete (#57)
+            deletion_protection=True,               # requires explicit disable before stack delete (#57)
+            point_in_time_recovery=True,            # enable PITR for catalog recovery (#57)
             **_ddb_kms_kwargs,
         )
 
@@ -326,11 +328,21 @@ class OpenDataStack(Stack):
                 resources=[f"arn:aws:quicksight:{qs_region}:{account_id}:*"],
             )
         )
-        # Read from public RODA buckets
+        # Read from public RODA buckets — intentional broad read (#52).
+        # RODA datasets span hundreds of public S3 buckets that cannot be enumerated
+        # at deploy time. The policy is read-only (GetObject + ListBucket, no PutObject).
+        # Write access is granted only to the manifest bucket via grant_read_write above.
+        # Operators who know their RODA bucket set can narrow this via roda_bucket_arns context.
+        _roda_bucket_arns_ctx = self.node.try_get_context("roda_bucket_arns")
+        _roda_resources = (
+            [f"arn:aws:s3:::{b}" for b in _roda_bucket_arns_ctx] + [f"arn:aws:s3:::{b}/*" for b in _roda_bucket_arns_ctx]
+            if _roda_bucket_arns_ctx
+            else ["arn:aws:s3:::*"]
+        )
         loader_fn.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["s3:GetObject", "s3:ListBucket"],
-                resources=["arn:aws:s3:::*"],
+                resources=_roda_resources,
             )
         )
 
@@ -538,6 +550,8 @@ class OpenDataStack(Stack):
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.RETAIN,
+            deletion_protection=True,               # stores Secret ARNs + connection metadata (#57)
+            point_in_time_recovery=True,            # enable PITR for source registry (#57)
             **_ddb_kms_kwargs,
         )
 
@@ -574,6 +588,18 @@ class OpenDataStack(Stack):
             },
         )
         source_registry_table.grant_write_data(register_source_fn)
+
+        # Restrict invocation to a specific admin IAM role/user, if configured (#55).
+        # Without this, any principal with lambda:InvokeFunction on this Lambda can
+        # register arbitrary sources (registry poisoning). Set register_source_admin_arn
+        # context to the ARN of the IAM role/user that should be allowed to invoke.
+        register_source_admin_arn = self.node.try_get_context("register_source_admin_arn")
+        if register_source_admin_arn:
+            register_source_fn.add_permission(
+                "AdminInvokeOnly",
+                principal=iam.ArnPrincipal(register_source_admin_arn),
+                action="lambda:InvokeFunction",
+            )
 
         # -----------------------------------------------------------------
         # Lambda: Snowflake Browse + Preview (AgentCore tools)

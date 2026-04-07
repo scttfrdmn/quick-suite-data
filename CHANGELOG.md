@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-04-06
+
+### Fixed
+- **Issue #52: S3 IAM role scoping** — RODA loader wildcard S3 read (`GetObject + ListBucket on *`) documented as intentional; no `PutObject` on wildcard; operators can narrow via `roda_bucket_arns` CDK context. Browse/preview/s3_load already scoped to configured buckets.
+- **Issue #53: SSRF in catalog quality check** — `_probe_s3_resources` now validates bucket names extracted from S3 ARNs against S3 naming rules (3–63 chars, lowercase, no `..`) before calling `head_bucket`; malformed ARN entries are skipped with a warning.
+- **Issue #54: QuickSight principal sourced from env var** — confirmed both `roda_load` and `s3_load` derive the QuickSight principal from `QUICKSIGHT_USER` env var (set at CDK deploy time), not from caller-supplied event fields.
+- **Issue #55: register-source connection_config validation** — `_validate_connection_config()` added: s3 sources require a JSON object with `bucket` key; snowflake/redshift sources require a Secrets Manager ARN; roda sources have no config constraints. CDK adds a `register_source_admin_arn`-gated resource policy when configured.
+- **Issue #56: Redshift workgroup not exposed** — `redshift_browse` response no longer includes `workgroup`; workgroup is read from Secrets Manager config only. Error messages sanitized.
+- **Issue #57: DynamoDB tables protection** — `catalog_table` now has `deletion_protection=True`, `point_in_time_recovery=True`, `removal_policy=RETAIN` (was DESTROY). `source_registry_table` now has `deletion_protection=True`, `point_in_time_recovery=True`.
+- **Issue #58: s3_preview file extension allowlist** — `_ALLOWED_EXTENSIONS` frozenset added; extension validated before any S3 read. Unsupported types (`.exe`, `.zip`, `.bin`, no-extension, etc.) return error immediately.
+- **Issue #59: Error message sanitization** — `s3_browse`, `s3_preview`, `redshift_browse`, `snowflake_browse` no longer return raw exception text, bucket names, Redshift workgroup names, Snowflake account identifiers, or AWS ARNs in error responses. Full details logged internally at ERROR level.
+
+### Added
+- 37 new security tests in `tests/test_security.py` covering all eight issues.
+
 ## [0.7.0] - 2026-04-02
 
 ### Added

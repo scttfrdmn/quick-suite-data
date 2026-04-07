@@ -106,7 +106,7 @@ def handler(event: dict, context: Any) -> dict:
     database = config.get("database", "")
     secret_arn = config.get("secret_arn", "")
 
-    sql = f"SELECT * FROM {schema}.{table} LIMIT {max_rows}"
+    sql = f'SELECT * FROM "{schema}"."{table}" LIMIT {max_rows}'
 
     try:
         exec_resp = redshift_data.execute_statement(

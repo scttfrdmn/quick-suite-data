@@ -119,10 +119,10 @@ def handler(event: dict, context: Any) -> dict:
         except Exception:
             pass
         logger.error(json.dumps({"snowflake_http_error": e.code, "body": body}))
-        return {"error": f"Snowflake API error: {body or str(e)}"}
+        return {"error": "Snowflake query failed"}  # sanitized: no HTTP body or account details (#59)
     except Exception as e:
         logger.error(json.dumps({"snowflake_error": str(e)}))
-        return {"error": f"Snowflake API error: {e}"}
+        return {"error": "Snowflake query failed"}  # sanitized (#59)
 
     # Parse result rows — Snowflake SQL API v2 returns {"data": [[col, ...], ...]}
     rows = result.get("data", [])
@@ -137,7 +137,7 @@ def handler(event: dict, context: Any) -> dict:
 
     return {
         "source_id": source_id,
-        "account": config.get("account", ""),
+        # account omitted — do not expose Snowflake account identifier (#59)
         "database": database,
         "schema": event.get("schema", "PUBLIC"),
         "tables": tables,

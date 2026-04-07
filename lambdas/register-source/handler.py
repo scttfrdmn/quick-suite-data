@@ -26,6 +26,41 @@ ALLOWED_CLASSIFICATIONS = {"public", "internal", "restricted", "phi"}
 REQUIRED_FIELDS = {"source_id", "type", "connection_config", "display_name", "description",
                    "data_classification"}
 
+# Secrets Manager ARN pattern: arn:aws:secretsmanager:{region}:{account}:secret:{name}
+_SECRETS_ARN_RE = __import__("re").compile(
+    r"^arn:aws:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]+"
+)
+
+
+def _validate_connection_config(source_type: str, connection_config) -> str | None:
+    """Return an error string if connection_config is invalid for the given source type.
+
+    Returns None when valid (#55 — prevent registry poisoning via malformed configs).
+    """
+    if source_type == "s3":
+        if isinstance(connection_config, str):
+            try:
+                config = json.loads(connection_config)
+            except (json.JSONDecodeError, TypeError):
+                return "connection_config for s3 sources must be a JSON object with a 'bucket' key"
+        elif isinstance(connection_config, dict):
+            config = connection_config
+        else:
+            return "connection_config for s3 sources must be a JSON object with a 'bucket' key"
+        if not config.get("bucket"):
+            return "connection_config for s3 sources must include a 'bucket' key"
+
+    elif source_type in ("snowflake", "redshift"):
+        raw = connection_config if isinstance(connection_config, str) else json.dumps(connection_config)
+        if not _SECRETS_ARN_RE.match(raw.strip()):
+            return (
+                f"connection_config for {source_type} sources must be a Secrets Manager ARN "
+                f"(arn:aws:secretsmanager:...)"
+            )
+
+    # roda: no connection config requirements
+    return None
+
 
 def handler(event: dict, context: Any) -> dict:
     """
@@ -69,6 +104,11 @@ def handler(event: dict, context: Any) -> dict:
                 f"Must be one of: {', '.join(sorted(ALLOWED_CLASSIFICATIONS))}"
             )
         }
+
+    # Validate connection_config format per source type (#55)
+    config_error = _validate_connection_config(source_type, connection_config)
+    if config_error:
+        return {"error": config_error}
 
     # Normalize connection_config to string for storage
     if isinstance(connection_config, dict):

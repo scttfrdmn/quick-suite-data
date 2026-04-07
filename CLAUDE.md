@@ -1,4 +1,4 @@
-# CLAUDE.md — quick-suite-open-data
+# CLAUDE.md — quick-suite-data
 
 ## What This Is
 
@@ -35,7 +35,7 @@ def handler(event: dict, context) -> dict:
 ## File Map
 
 ```
-quick-suite-open-data/
+quick-suite-data/
 ├── app.py                          CDK entry point
 ├── cdk.json                        CDK config + context flags
 ├── pyproject.toml                  uv / Python project config
@@ -125,8 +125,8 @@ Register each ARN via the AgentCore Gateway console or API.
 Work is tracked in GitHub — not in local files. Do not add TODO lists or task
 tracking to CLAUDE.md or create TODO.md files.
 
-- **Issues:** https://github.com/scttfrdmn/quick-suite-open-data/issues
-- **Milestones:** https://github.com/scttfrdmn/quick-suite-open-data/milestones
+- **Issues:** https://github.com/scttfrdmn/quick-suite-data/issues
+- **Milestones:** https://github.com/scttfrdmn/quick-suite-data/milestones
 - **Project board:** https://github.com/users/scttfrdmn/projects/45
 - **Changelog:** CHANGELOG.md (keepachangelog format, semver 2.0)
 

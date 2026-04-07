@@ -121,7 +121,7 @@ class TestRegisterSource:
         mod.handler({
             "source_id": "reregister-source",
             "type": "s3",
-            "connection_config": "config-v1",
+            "connection_config": {"bucket": "my-bucket", "prefix": "data/"},
             "display_name": "Old Name",
             "description": "Original description",
             "data_classification": "public",
@@ -130,7 +130,7 @@ class TestRegisterSource:
         result = mod.handler({
             "source_id": "reregister-source",
             "type": "snowflake",
-            "connection_config": "arn:aws:secretsmanager:us-east-1:123:secret:sf",
+            "connection_config": "arn:aws:secretsmanager:us-east-1:123456789012:secret:sf",
             "display_name": "New Name",
             "description": "Updated description",
             "data_classification": "restricted",
@@ -147,11 +147,18 @@ class TestRegisterSource:
         self._create_table(substrate_url)
         mod = self._reload(substrate_url, monkeypatch)
 
+        # Use type-valid connection_config values (#55 — format validation)
+        valid_configs = {
+            "s3": {"bucket": "my-bucket"},
+            "snowflake": "arn:aws:secretsmanager:us-east-1:123456789012:secret:sf",
+            "redshift": "arn:aws:secretsmanager:us-east-1:123456789012:secret:rs",
+            "roda": "{}",
+        }
         for source_type in ["s3", "snowflake", "redshift", "roda"]:
             result = mod.handler({
                 "source_id": f"test-{source_type}",
                 "type": source_type,
-                "connection_config": "config",
+                "connection_config": valid_configs[source_type],
                 "display_name": f"Test {source_type}",
                 "description": "Description",
                 "data_classification": "public",
@@ -167,7 +174,7 @@ class TestRegisterSource:
             result = mod.handler({
                 "source_id": f"test-cls-{i}",
                 "type": "s3",
-                "connection_config": "config",
+                "connection_config": {"bucket": "my-bucket"},  # valid s3 config (#55)
                 "display_name": f"Test {cls}",
                 "description": "Description",
                 "data_classification": cls,

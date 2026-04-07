@@ -123,8 +123,7 @@ class TestRedshiftBrowse:
 
         assert "error" not in result
         assert result["source_id"] == "rs-prod"
-        assert result["workgroup"] == "my-workgroup"
-        assert result["database"] == "mydb"
+        assert "workgroup" not in result  # workgroup is not exposed in response (#56, #59)
         assert isinstance(result["tables"], list)
         assert isinstance(result["count"], int)
 
@@ -197,7 +196,7 @@ class TestRedshiftBrowseResultParsing:
 
         assert "error" in result
         assert "Redshift query failed" in result["error"]
-        assert "Permission denied" in result["error"]
+        assert "Permission denied" not in result["error"]  # error is sanitized (#59)
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +329,36 @@ class TestRedshiftPreviewResultParsing:
         call_kwargs = mock_rd.execute_statement.call_args[1]
         assert "LIMIT 25" in call_kwargs["Sql"]
         assert result["row_count"] <= 25
+
+    def test_sql_uses_quoted_identifiers(self):
+        """SQL must double-quote schema and table names (defence-in-depth against injection)."""
+        path = os.path.join(REPO_ROOT, "lambdas", "redshift-preview", "handler.py")
+        alias = "_rs_preview_sql_quoted"
+        spec = importlib.util.spec_from_file_location(alias, path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[alias] = mod
+        with patch.dict(os.environ, {"REDSHIFT_SECRET_ARN": "arn:test"}):
+            spec.loader.exec_module(mod)
+
+        mock_sc = MagicMock()
+        mock_sc.get_secret_value.return_value = {"SecretString": json.dumps(_REDSHIFT_SECRET)}
+        mock_rd = MagicMock()
+        mock_rd.execute_statement.return_value = {"Id": "stmt-quoted-test"}
+        mock_rd.describe_statement.return_value = {"Status": "FINISHED"}
+        mock_rd.get_statement_result.return_value = {
+            "ColumnMetadata": [{"name": "id"}],
+            "Records": [[{"stringValue": "1"}]],
+        }
+        with patch.object(mod, "secrets_client", mock_sc):
+            with patch.object(mod, "redshift_data", mock_rd):
+                mod.handler(
+                    {"source_id": "rs-prod", "schema": "public", "table": "orders"},
+                    None,
+                )
+        call_kwargs = mock_rd.execute_statement.call_args[1]
+        assert '"public"."orders"' in call_kwargs["Sql"], (
+            f"Expected quoted identifiers in SQL; got: {call_kwargs['Sql']}"
+        )
 
     @pytest.mark.integration
     def test_aborted_status_returns_error(self, substrate_url, reset_substrate, monkeypatch):

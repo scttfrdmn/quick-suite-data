@@ -14,6 +14,7 @@ Emits CloudWatch metrics:
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -69,11 +70,23 @@ def _compute_quality_score(item: dict, now: int) -> dict:
     }
 
 
+# S3 bucket name: 3–63 chars, lowercase letters/numbers/hyphens/dots, no consecutive dots,
+# must start and end with letter or number. Validate before any SDK call to prevent SSRF via
+# crafted ARN entries in the catalog (#53).
+_S3_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9\-.]{1,61}[a-z0-9]$")
+
+
+def _validate_bucket_name(bucket: str) -> bool:
+    """Return True if bucket follows S3 naming rules."""
+    return bool(_S3_BUCKET_RE.match(bucket)) and ".." not in bucket
+
+
 def _probe_s3_resources(s3_resources: list) -> bool:
     """
     Return True if any S3 resource bucket is unreachable (NoSuchBucket / 404).
     Uses an anonymous client — RODA datasets are publicly accessible.
     Other errors (403 AccessDenied, network) are ignored to avoid false positives.
+    Bucket names are validated against S3 naming rules before use (#53).
     """
     for resource in s3_resources:
         arn = resource.get("arn", "")
@@ -82,6 +95,9 @@ def _probe_s3_resources(s3_resources: list) -> bool:
             continue
         bucket = arn.split(":::")[-1].strip()
         if not bucket:
+            continue
+        if not _validate_bucket_name(bucket):
+            logger.warning(json.dumps({"skipped_invalid_bucket": bucket}))
             continue
         try:
             s3_anon.head_bucket(Bucket=bucket)

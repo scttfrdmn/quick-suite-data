@@ -77,6 +77,13 @@ else:
         logger.error(f"Invalid SOURCES_CONFIG JSON: {e}")
         _sources = []
 
+if not _USE_SOURCE_REGISTRY and not _sources:
+    logger.warning(json.dumps({
+        "level": "WARN",
+        "msg": "No S3 sources configured — set SOURCES_CONFIG or USE_SOURCE_REGISTRY=true. "
+               "All browse requests will return 'source not found'.",
+    }))
+
 
 def handler(event: dict, context: Any) -> dict:
     """
@@ -176,10 +183,10 @@ def handler(event: dict, context: Any) -> dict:
         }
 
     except s3.exceptions.NoSuchBucket:
-        return {'error': f'Bucket {bucket} not found or not accessible.'}
+        return {'error': f'Source "{source_label}" is not accessible.'}  # bucket name sanitized (#59)
     except Exception as e:
         logger.error(f"s3_browse failed for source={source_label}: {e}")
-        return {'error': f'Browse failed: {e}'}
+        return {'error': 'Browse failed. Check the source name and try again.'}  # sanitized (#59)
 
 
 def _list_sources(sources: list | None = None) -> dict:

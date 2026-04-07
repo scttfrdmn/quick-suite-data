@@ -124,7 +124,7 @@ def handler(event: dict, context: Any) -> dict:
     if config is None:
         return {"error": "Snowflake source not configured"}
 
-    sql = f"SELECT * FROM {schema}.{table} LIMIT {max_rows}"
+    sql = f'SELECT * FROM "{schema}"."{table}" LIMIT {max_rows}'
 
     try:
         result = _snowflake_execute(config, sql)
