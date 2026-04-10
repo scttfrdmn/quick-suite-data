@@ -174,7 +174,7 @@ class OpenDataStack(Stack):
         # -----------------------------------------------------------------
         # S3: Manifest Bucket
         # -----------------------------------------------------------------
-        _s3_encryption = s3.BucketEncryption.KMS if enable_kms else s3.BucketEncryption.S3_MANAGED
+        _s3_encryption = s3.BucketEncryption.KMS if enable_kms else s3.BucketEncryption.KMS_MANAGED
         _s3_kms_kwargs: dict = {"encryption": _s3_encryption}
         if enable_kms and cmk:
             _s3_kms_kwargs["encryption_key"] = cmk
@@ -183,6 +183,7 @@ class OpenDataStack(Stack):
             self,
             "ManifestBucket",
             bucket_name=manifest_bucket_name,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             removal_policy=RemovalPolicy.DESTROY,
             auto_delete_objects=True,
             lifecycle_rules=[
