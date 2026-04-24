@@ -279,8 +279,8 @@ Substrate integration tests in CI (see capstone `CLAUDE.md` for details).
 Work is tracked in GitHub -- not in local files. Do not add TODO lists or task
 tracking to CLAUDE.md or create TODO.md files.
 
-- **Issues:** https://github.com/scttfrdmn/quick-suite-data/issues
-- **Milestones:** https://github.com/scttfrdmn/quick-suite-data/milestones
+- **Issues:** https://github.com/scttfrdmn/campus-data/issues
+- **Milestones:** https://github.com/scttfrdmn/campus-data/milestones
 - **Project board:** https://github.com/users/scttfrdmn/projects/45
 - **Changelog:** CHANGELOG.md (keepachangelog format, semver 2.0)
 

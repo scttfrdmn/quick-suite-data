@@ -1,7 +1,7 @@
 [project]
-name = "quick-suite-data"
+name = "campus-data"
 version = "0.13.0"
-description = "RODA public datasets and institutional S3 browser for Amazon Quick Suite"
+description = "Public and institutional data access for AgentCore tool planes"
 requires-python = ">=3.12"
 dependencies = [
     "aws-cdk-lib>=2.170.0",

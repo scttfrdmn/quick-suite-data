@@ -1,20 +1,20 @@
 # Quick Suite Data
 
-**Give Quick Suite access to 500+ public research datasets, institutional data warehouses, and scientific literature — without touching a data pipeline.**
+**Give any AgentCore-connected agent access to 500+ public research datasets, institutional data warehouses, and scientific literature — without touching a data pipeline.**
 
-Quick Suite can visualize data that's already in Quick Sight. But getting data *into*
-Quick Sight has always required manual work: finding the dataset, downloading or
+Most agents can only query data that's already been prepared for them. Getting data *into*
+that prepared state has always required manual work: finding the dataset, downloading or
 configuring S3 access, building a manifest file, clicking through the console to create
 a data source, waiting for the SPICE import. For a researcher or an IR analyst, that
 friction is a barrier to every new question.
 
-This extension removes that barrier. It adds 15 tools to Quick Suite's chat interface
-that let users find, preview, and load data by describing what they need in plain
-language — public research datasets from the Registry of Open Data on AWS, institutional
-data from S3, Snowflake, and Redshift, scientific literature from seven databases, and
-research funding data from three federal sources.
+This extension removes that barrier. It adds 15 tools to any AgentCore-connected agent
+(Quick Suite, Kiro, custom) that let users find, preview, and load data by describing
+what they need in plain language — public research datasets from the Registry of Open
+Data on AWS, institutional data from S3, Snowflake, and Redshift, scientific literature
+from seven databases, and research funding data from three federal sources.
 
-## What Quick Suite Alone Can't Do Here
+## What most agents can't do without this extension
 
 - Search the Registry of Open Data on AWS and load a dataset into Quick Sight in a single conversation
 - Browse your institution's S3 buckets (SIS exports, financial aid files, research data) without console access
@@ -125,8 +125,8 @@ roda_load            s3_preview           snowflake_preview    biorxiv_search
 ## Quick Start
 
 ```bash
-git clone https://github.com/scttfrdmn/quick-suite-data.git
-cd quick-suite-data
+git clone https://github.com/scttfrdmn/campus-data.git
+cd campus-data
 
 uv sync --extra dev   # or: pip install -r requirements.txt
 
